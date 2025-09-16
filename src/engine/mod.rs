@@ -6,7 +6,6 @@
 use crate::{
     config::Config,
     domain::{Identity, NetworkState, SignedMessage, TelemetryData},
-    engine::protocol,
     transport::{InboundMessage, TransportCommand},
 };
 use std::{

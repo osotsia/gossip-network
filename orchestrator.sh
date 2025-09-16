@@ -58,6 +58,11 @@ PIDS=()
 cleanup() {
     echo ""
     echo "--- Shutting down cluster ---"
+    # Kill the blocking process if it exists
+    if [ -n "${BLOCKER_PID-}" ]; then
+        kill "$BLOCKER_PID" 2>/dev/null || true
+    fi
+
     if [ ${#PIDS[@]} -ne 0 ]; then
         # Kill all child processes gracefully. The `|| true` prevents errors if a process is already dead.
         kill "${PIDS[@]}" 2>/dev/null || true
@@ -74,18 +79,25 @@ trap cleanup EXIT
 # --- Pre-flight Checks ---
 echo "--- Preparing environment ---"
 
-# 1. Check for the 'certs' directory, which is a prerequisite.
+# 1. Check for the 'certs' directory.
 if [ ! -d "certs" ] || [ ! -f "certs/ca.cert" ]; then
     echo "Error: 'certs' directory with required TLS certificates not found."
     echo "Please run the certificate generation steps outlined in the documentation."
     exit 1
 fi
 
-# 2. Build the Rust binary in release mode for performance.
+# 2. Check for the frontend build directory.
+if [ ! -d "frontend/dist" ]; then
+    echo "Error: 'frontend/dist' directory not found."
+    echo "Please build the Svelte frontend first (e.g., cd frontend && npm install && npm run build)."
+    exit 1
+fi
+
+# 3. Build the Rust binary in release mode for performance.
 echo "Building gossip-network binary..."
 cargo build --release
 
-# 3. Clean up and create the directory for generated configurations.
+# 4. Clean up and create the directory for generated configurations.
 echo "Creating cluster directory: $CLUSTER_DIR"
 rm -rf "$CLUSTER_DIR"
 mkdir -p "$CLUSTER_DIR"
@@ -101,23 +113,30 @@ for i in $(seq 0 $((NUM_NODES - 1))); do
 
     mkdir -p "$NODE_DIR"
 
-    # Create the base configuration file. Bootstrap peers will be added in Phase 2.
+    # Create the base configuration file.
     cat << EOF > "$CONFIG_PATH"
 # Auto-generated configuration for node-$i
 identity_path = "identity.key"
 p2p_addr = "127.0.0.1:$P2P_PORT"
 gossip_interval_ms = 1500
+gossip_factor = 2
+node_ttl_ms = 300000
 bootstrap_peers = []
 EOF
 
-    # Designate node-0 as the single visualizer node (Approach A).
+    # Designate node-0 as the single visualizer node.
     if [ "$i" -eq 0 ]; then
         cat << EOF >> "$CONFIG_PATH"
 
 [visualizer]
 bind_addr = "127.0.0.1:$VISUALIZER_PORT"
 EOF
+        # **FIX:** Copy the frontend assets to the visualizer node's directory.
+        cp -r frontend/dist "$NODE_DIR/"
     fi
+
+    # Copy the certs directory into each node's directory.
+    cp -r certs "$NODE_DIR/"
 
     echo "Generated base config for node-$i at $CONFIG_PATH"
 done
@@ -136,15 +155,14 @@ for i in $(seq 0 $((NUM_NODES - 1))); do
     done
 
     # Calculate the number of peers to connect to based on the ratio.
-    # Use awk for floating point multiplication and integer conversion.
     num_peers_to_connect=$(awk "BEGIN {print int((${#potential_peers[@]}) * $CONNECTION_RATIO)}")
 
     if [ "$num_peers_to_connect" -gt 0 ]; then
-        # Randomly select peers and format them for the TOML array.
-        selected_peers=$(printf "%s\n" "${potential_peers[@]}" | shuf -n "$num_peers_to_connect")
+        # Randomly select peers using a portable method.
+        selected_peers=$(printf "%s\n" "${potential_peers[@]}" | awk 'BEGIN{srand()}{print rand() "\t" $0}' | sort -n | cut -f2- | head -n "$num_peers_to_connect")
         peers_toml_array=$(echo "$selected_peers" | awk '{print "\""$0"\""}' | paste -sd, -)
 
-        # Append the bootstrap_peers list to the config file portably.
+        # Append the bootstrap_peers list to the config file.
         sed "s/bootstrap_peers = \[\]/bootstrap_peers = [$peers_toml_array]/" "$CONFIG_PATH" > "$CONFIG_PATH.tmp" && mv "$CONFIG_PATH.tmp" "$CONFIG_PATH"
 
         echo "node-$i will connect to $num_peers_to_connect peer(s)."
@@ -158,12 +176,9 @@ echo "--- Launching $NUM_NODES nodes ---"
 for i in $(seq 0 $((NUM_NODES - 1))); do
     NODE_DIR="$CLUSTER_DIR/node-$i"
     
-    # Run each node in its own directory so it can find its config.toml and create its identity.key
     (
         cd "$NODE_DIR"
-        # Launch the binary in the background. Redirect stdout/stderr to a log file.
         ../../target/release/gossip-network > node.log 2>&1 &
-        # Store the PID of the background process.
         PIDS+=($!)
         echo "Launched node-$i (PID: $!)"
     )
@@ -177,6 +192,8 @@ echo "Logs for each node are located in '$CLUSTER_DIR/node-*/node.log'"
 echo "Press Ctrl+C to stop the cluster."
 echo ""
 
-# Wait indefinitely for a signal (like Ctrl+C), allowing the cluster to run.
-# The 'trap' will handle the cleanup.
-wait
+# **FIX:** Keep the script alive so the trap can catch Ctrl+C.
+# This starts a process in the background and waits for it.
+tail -f /dev/null &
+BLOCKER_PID=$!
+wait "$BLOCKER_PID"

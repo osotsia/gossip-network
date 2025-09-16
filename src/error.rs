@@ -27,17 +27,17 @@ pub enum Error {
     #[error("Tokio task join error: {0}")]
     TaskJoin(#[from] tokio::task::JoinError),
 
-    #[error("Tokio runtime error: {0}")]
-    TokioRuntime(#[from] tokio::runtime::InitError),
-
     #[error("TLS configuration error: {0}")]
     TlsConfig(String),
 
-    #[error("Network connection to {0} failed: {1}")]
-    ConnectionFailed(SocketAddr, #[source] quinn::ConnectError),
+    #[error("Failed to initiate connection to {0}: {1}")]
+    ConnectFailed(SocketAddr, #[source] quinn::ConnectError),
 
-    #[error("Failed to establish connection: {0}")]
-    ConnectionError(#[from] quinn::ConnectionError),
+    #[error("Connection to {0} failed during establishment: {1}")]
+    ConnectionEstablishFailed(SocketAddr, #[source] quinn::ConnectionError),
+
+    #[error("An established connection failed: {0}")]
+    Connection(#[from] quinn::ConnectionError),
 
     #[error("Failed to write to network stream: {0}")]
     WriteStream(#[from] quinn::WriteError),

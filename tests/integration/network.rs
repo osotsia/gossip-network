@@ -4,13 +4,13 @@
 //! up multiple real nodes, connects them, and verifies that state is correctly
 //! propagated through the gossip protocol.
 
-use axum_tungstenite::tungstenite::Message;
 use futures::{SinkExt, StreamExt};
 use gossip_network::{domain::NetworkState, App};
 use std::time::Duration;
-use tokio::time::timeout;
-use tokio_util::sync::CancellationToken;
 use tempfile::tempdir;
+use tokio::time::timeout;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 
 mod common;
 
@@ -18,7 +18,7 @@ async fn connect_with_retry(
     ws_url: String,
     max_retries: u32,
     delay: Duration,
-) -> axum_tungstenite::tungstenite::protocol::WebSocket<
+) -> tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 > {
     let mut retries = 0;
@@ -38,7 +38,6 @@ async fn connect_with_retry(
         }
     }
 }
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_state_propagation_across_two_nodes() {
@@ -113,5 +112,8 @@ async fn test_state_propagation_across_two_nodes() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Assert that the test did not time out.
-    assert!(result.is_ok(), "Test timed out: Node B did not receive Node A's state.");
+    assert!(
+        result.is_ok(),
+        "Test timed out: Node B did not receive Node A's state."
+    );
 }

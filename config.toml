@@ -22,5 +22,5 @@ gossip_factor = 2
 node_ttl_ms = 300000
 
 # Uncomment the following section to enable the web visualizer.
-# [visualizer]
-# bind_addr = "127.0.0.1:8080"
+[visualizer]
+bind_addr = "127.0.0.1:8080"

@@ -25,7 +25,10 @@ pub struct ApiServer {
 
 impl ApiServer {
     pub fn new(bind_addr: SocketAddr, state_rx: watch::Receiver<NetworkState>) -> Self {
-        Self { bind_addr, state_rx }
+        Self {
+            bind_addr,
+            state_rx,
+        }
     }
 
     pub async fn run(self, shutdown_token: CancellationToken) -> crate::error::Result<()> {
@@ -33,17 +36,19 @@ impl ApiServer {
             state_rx: self.state_rx,
         };
 
+        // **FIX:** The server runs from inside a node's directory, where the assets
+        // are copied to a `dist` folder. The path should not include `frontend`.
         let app = Router::new()
             .route("/ws", get(websocket_handler))
-            .nest_service("/", ServeDir::new("frontend/dist"))
+            .nest_service("/", ServeDir::new("dist"))
             .with_state(app_state);
 
         tracing::info!(listen_addr = %self.bind_addr, "API server listening");
-        
+
         let listener = tokio::net::TcpListener::bind(self.bind_addr).await?;
 
         axum::serve(listener, app)
-            .with_graceful_shutdown(async {
+            .with_graceful_shutdown(async move {
                 shutdown_token.cancelled().await;
                 tracing::info!("API server received shutdown signal.");
             })

@@ -5,8 +5,10 @@
 //! the concepts of data representation (model) and identity (crypto).
 
 use crate::error::{Error, Result};
-use ed25519_dalek::{Signer, SigningKey, Signature, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
+use ed25519_dalek::{
+    Signature, Signer, SigningKey, Verifier, VerifyingKey,
+};
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt, fs, io, path::Path};
 
@@ -23,7 +25,10 @@ impl Identity {
     /// Generates a new, random identity.
     pub fn new() -> Self {
         let mut csprng = OsRng;
-        let keypair = SigningKey::generate(&mut csprng);
+        // In ed25519-dalek v2, we generate a secret key and derive the signing key from it.
+        let mut secret_key_bytes = [0u8; 32];
+        csprng.fill_bytes(&mut secret_key_bytes);
+        let keypair = SigningKey::from_bytes(&secret_key_bytes);
         let node_id = NodeId(keypair.verifying_key().to_bytes());
         Self { keypair, node_id }
     }
@@ -40,6 +45,7 @@ impl Identity {
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 let identity = Self::new();
+                // Store only the secret part of the keypair.
                 fs::write(path.as_ref(), identity.keypair.to_bytes())?;
                 Ok(identity)
             }
@@ -56,7 +62,7 @@ impl Identity {
         SignedMessage {
             message: message_data,
             originator: self.node_id,
-            signature: signature.to_bytes(),
+            signature,
         }
     }
 }
@@ -92,16 +98,15 @@ pub struct TelemetryData {
 pub struct SignedMessage {
     pub message: TelemetryData,
     pub originator: NodeId,
-    pub signature: [u8; 64],
+    pub signature: Signature,
 }
 
 impl SignedMessage {
     /// Verifies that the message was authentically signed by the originator.
     pub fn verify(&self) -> Result<()> {
         let public_key = VerifyingKey::from_bytes(self.originator.as_bytes())?;
-        let signature = Signature::from_bytes(&self.signature)?;
         let message_bytes = bincode::serialize(&self.message)?;
-        public_key.verify(&message_bytes, &signature)?;
+        public_key.verify(&message_bytes, &self.signature)?;
         Ok(())
     }
 }

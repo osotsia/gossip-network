@@ -17,10 +17,14 @@ pub async fn connect_to_peer(
     connections: Arc<Mutex<HashMap<SocketAddr, Connection>>>,
     peer_addr: SocketAddr,
 ) -> Result<Connection> {
-    let conn = endpoint
-        .connect(peer_addr, "localhost")?
+    let connecting = endpoint
+        .connect(peer_addr, "localhost")
+        .map_err(|e| Error::ConnectFailed(peer_addr, e))?;
+
+    let conn = connecting
         .await
-        .map_err(|e| Error::ConnectionFailed(peer_addr, e))?;
+        .map_err(|e| Error::ConnectionEstablishFailed(peer_addr, e))?;
+
     tracing::info!(peer = %peer_addr, "Successfully connected to peer");
     connections.lock().await.insert(peer_addr, conn.clone());
     Ok(conn)
@@ -32,7 +36,7 @@ async fn get_or_create_connection(
     connections: Arc<Mutex<HashMap<SocketAddr, Connection>>>,
     addr: SocketAddr,
 ) -> Result<Connection> {
-    let mut conns_guard = connections.lock().await;
+    let conns_guard = connections.lock().await;
     if let Some(conn) = conns_guard.get(&addr) {
         if conn.close_reason().is_none() {
             return Ok(conn.clone());
@@ -71,27 +75,35 @@ pub async fn handle_connection(
 
     loop {
         tokio::select! {
-            Ok(mut recv) = connection.accept_uni() => {
-                let inbound_tx = inbound_tx.clone();
-                tokio::spawn(async move {
-                    match recv.read_to_end(MAX_MESSAGE_SIZE).await {
-                        Ok(bytes) => {
-                            match bincode::deserialize::<SignedMessage>(&bytes) {
-                                Ok(message) => {
-                                    let inbound = InboundMessage { peer_addr, message };
-                                    if inbound_tx.send(inbound).await.is_err() {
-                                        tracing::warn!("Inbound message channel is closed.");
+            stream = connection.accept_uni() => {
+                match stream {
+                    Ok(mut recv) => {
+                        let inbound_tx = inbound_tx.clone();
+                        tokio::spawn(async move {
+                            match recv.read_to_end(MAX_MESSAGE_SIZE).await {
+                                Ok(bytes) => {
+                                    match bincode::deserialize::<SignedMessage>(&bytes) {
+                                        Ok(message) => {
+                                            let inbound = InboundMessage { peer_addr, message };
+                                            if inbound_tx.send(inbound).await.is_err() {
+                                                tracing::warn!("Inbound message channel is closed.");
+                                            }
+                                        }
+                                        Err(e) => tracing::error!(from = %peer_addr, error = %e, "Failed to deserialize message"),
                                     }
                                 }
-                                Err(e) => tracing::error!(from = %peer_addr, error = %e, "Failed to deserialize message"),
+                                Err(e) => tracing::error!(from = %peer_addr, error = %e, "Failed to read from stream (potential DoS: exceeded size limit)"),
                             }
-                        }
-                        Err(e) => tracing::error!(from = %peer_addr, error = %e, "Failed to read from stream (potential DoS: exceeded size limit)"),
+                        });
                     }
-                });
+                    Err(e) => {
+                        tracing::warn!(peer = %peer_addr, error = %e, "Stream acceptance failed");
+                        break Ok(());
+                    }
+                }
             }
-            Err(e) = connection.closed() => {
-                 tracing::info!(peer = %peer_addr, reason = %e, "Connection closed");
+            reason = connection.closed() => {
+                 tracing::info!(peer = %peer_addr, reason = %reason, "Connection closed");
                  connections.lock().await.remove(&peer_addr);
                  return Ok(());
             }

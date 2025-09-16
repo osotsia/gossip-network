@@ -5,7 +5,7 @@
 
 use crate::{
     domain::SignedMessage,
-    error::{Error, Result},
+    error::Result,
     transport::{connection::handle_connection, tls::configure_tls},
 };
 use quinn::{Connection, Endpoint};
