@@ -180,16 +180,18 @@ impl Engine {
     }
 
     fn publish_state(&self) {
-        // Find the NodeIds corresponding to the bootstrap peer addresses.
-        let bootstrap_node_ids: Vec<_> = self.config.bootstrap_peers.iter().filter_map(|addr| {
-            self.known_peers.iter().find_map(|(id, peer_addr)| if peer_addr == addr { Some(*id) } else { None })
-        }).collect();
+        // FIX: The `edges` field should represent the node's current set of
+        // known peers, not the static bootstrap list from the configuration.
+        // This provides an accurate view of the node's connections for the visualizer.
+        let current_edges: Vec<_> = self.known_peers.keys().cloned().collect();
         
         let state = NetworkState {
             self_id: Some(self.identity.node_id),
             nodes: self.node_info.clone(),
-            edges: bootstrap_node_ids,
+            edges: current_edges,
         };
+        
+        // The send operation remains the same.
         let _ = self.state_tx.send(state);
     }
 }

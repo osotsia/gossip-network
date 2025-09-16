@@ -1,34 +1,37 @@
-<script>
+<script lang="ts">
   import * as d3 from 'd3';
+  import type { GraphData, SimulationNode, SimulationLink } from '$lib/types';
 
-  // The 'data' prop is now a plain object, but Svelte knows to
-  // update this component when it changes because of the reactive
-  // getter in the parent (`networkStore.graph`).
-  let { data } = $props();
+  let { data }: { data: GraphData } = $props();
 
-  let svgEl = $state();
+  let svgEl: SVGElement | undefined = $state();
   let width = $state(0);
   let height = $state(0);
 
-  const simulation = d3
-    .forceSimulation()
+  const simulation: d3.Simulation<SimulationNode, SimulationLink> = d3
+    .forceSimulation<SimulationNode>()
     .force('charge', d3.forceManyBody().strength(-100))
-    .force('link', d3.forceLink().id((d) => d.id).strength(0.1))
+    .force('link', d3.forceLink<SimulationNode, SimulationLink>()
+        .id((d) => d.id)
+        .strength(0.1))
     .force('center', d3.forceCenter());
 
   $effect(() => {
     if (!svgEl) return;
 
-    const oldNodeMap = new Map(simulation.nodes().map((d) => [d.id, d]));
+    const oldNodeMap = new Map<string, SimulationNode>(
+      simulation.nodes().map((d) => [d.id, d])
+    );
+
     const nodes = data.nodes.map((d) =>
       Object.assign(oldNodeMap.get(d.id) || { x: width / 2, y: height / 2 }, d)
     );
 
     simulation.nodes(nodes);
-    simulation.force('link').links(data.links);
-    simulation.force('center').x(width / 2).y(height / 2);
+    simulation.force<d3.ForceLink<SimulationNode, SimulationLink>>('link')?.links(data.links);
+    simulation.force<d3.ForceCenter<SimulationNode>>('center')?.x(width / 2).y(height / 2);
 
-    const communityFoci = new Map();
+    const communityFoci = new Map<number, { x: number; y: number }>();
     const communityCount = data.communities.size;
     let i = 0;
     for (const communityId of data.communities.keys()) {
@@ -40,19 +43,20 @@
       i++;
     }
 
-    simulation.force('x', d3.forceX((d) => communityFoci.get(d.community_id)?.x || width / 2).strength(0.05));
-    simulation.force('y', d3.forceY((d) => communityFoci.get(d.community_id)?.y || height / 2).strength(0.05));
+    simulation
+      .force('x', d3.forceX<SimulationNode>((d) => communityFoci.get(d.community_id)?.x ?? width / 2).strength(0.05))
+      .force('y', d3.forceY<SimulationNode>((d) => communityFoci.get(d.community_id)?.y ?? height / 2).strength(0.05));
 
     simulation.alpha(0.4).restart();
   });
 
   $effect(() => {
     if (!svgEl) return;
-    const g = d3.select(svgEl).select('g');
-    const zoom = d3.zoom().on('zoom', (event) => {
-      g.attr('transform', event.transform);
+    const g = d3.select(svgEl).select<SVGGElement>('g');
+    const zoomBehavior = d3.zoom<SVGElement, unknown>().on('zoom', (event) => {
+      g.attr('transform', event.transform.toString());
     });
-    d3.select(svgEl).call(zoom);
+    d3.select(svgEl).call(zoomBehavior);
     return () => d3.select(svgEl).on('.zoom', null);
   });
 </script>
@@ -60,16 +64,14 @@
 <svg bind:this={svgEl} {width} {height}>
   <g>
     <g class="links" stroke="#555" stroke-width="1.5" stroke-opacity="0.6">
-      <!-- Optimization: Iterate over the simulation's links. The `source` and `target`
-           properties are replaced by D3 with direct references to the node objects,
-           which contain the calculated x/y coordinates. This is much more efficient
-           than searching for nodes in an array on every render. -->
-      {#each simulation.force('link').links() as link}
+      {#each (simulation.force('link') as d3.ForceLink<SimulationNode, SimulationLink>).links() as link}
+        {@const source = link.source as SimulationNode}
+        {@const target = link.target as SimulationNode}
         <line
-          x1={link.source.x}
-          y1={link.source.y}
-          x2={link.target.x}
-          y2={link.target.y}
+          x1={source.x}
+          y1={source.y}
+          x2={target.x}
+          y2={target.y}
         />
       {/each}
     </g>
