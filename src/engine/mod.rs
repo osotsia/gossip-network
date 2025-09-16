@@ -132,7 +132,23 @@ impl Engine {
         self.node_info.insert(self.identity.node_id, node_info);
 
         self.publish_state();
-        self.gossip_to_peers(signed_message).await;
+
+        // --- START MODIFICATION ---
+
+        // 1. Gossip to already known peers (the existing logic).
+        self.gossip_to_peers(signed_message.clone()).await;
+
+        // 2. Proactively gossip to configured bootstrap peers to break the initial deadlock.
+        // This ensures that we initiate communication even if we haven't received
+        // any messages from them yet.
+        for &addr in &self.config.bootstrap_peers {
+            tracing::debug!(peer_addr = %addr, "Proactively gossiping to bootstrap peer");
+            let command = TransportCommand::SendMessage(addr, signed_message.clone());
+            if let Err(e) = self.transport_tx.send(command).await {
+                tracing::error!(error = %e, "Failed to send command to transport service for bootstrap peer");
+            }
+        }
+        // --- END MODIFICATION ---
     }
 
     async fn gossip_to_peers(&self, message: SignedMessage) {
@@ -140,7 +156,8 @@ impl Engine {
             protocol::select_peers(&self.known_peers, message.originator, self.config.gossip_factor);
 
         if peers_to_gossip_to.is_empty() {
-            tracing::warn!("No peers to gossip to. Is the network empty?");
+            // This is now an expected condition at startup before bootstrap peers are known.
+            tracing::debug!("No known peers to gossip to yet.");
             return;
         }
 
@@ -180,9 +197,6 @@ impl Engine {
     }
 
     fn publish_state(&self) {
-        // FIX: The `edges` field should represent the node's current set of
-        // known peers, not the static bootstrap list from the configuration.
-        // This provides an accurate view of the node's connections for the visualizer.
         let current_edges: Vec<_> = self.known_peers.keys().cloned().collect();
         
         let state = NetworkState {
@@ -191,7 +205,11 @@ impl Engine {
             edges: current_edges,
         };
         
-        // The send operation remains the same.
+        // Add a debug log to print the JSON that will be sent to the frontend.
+        if let Ok(json_state) = serde_json::to_string(&state) {
+            tracing::debug!(payload = %json_state, "Publishing state update to API");
+        }
+        
         let _ = self.state_tx.send(state);
     }
 }

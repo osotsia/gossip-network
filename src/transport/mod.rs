@@ -111,8 +111,12 @@ impl Transport {
                 let endpoint = self.endpoint.clone();
                 let connections = self.connections.clone();
                 tokio::spawn(async move {
+                    // MODIFICATION: Change log level from `error` to `warn`.
+                    // A failed message send to a single peer is a routine network event,
+                    // not a critical application error. The gossip protocol is designed
+                    // to tolerate this.
                     if let Err(e) = connection::send_message_to_peer(endpoint, connections, addr, msg).await {
-                        tracing::error!(peer = %addr, error = %e, "Failed to send message");
+                        tracing::warn!(peer = %addr, error = %e, "Failed to send message");
                     }
                 });
             }
