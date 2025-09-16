@@ -71,7 +71,7 @@ impl Identity {
 
 /// A unique identifier for a node, derived from its public key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NodeId([u8; 32]);
+pub struct NodeId(pub [u8; 32]);
 
 impl NodeId {
     pub fn as_bytes(&self) -> &[u8; 32] {
