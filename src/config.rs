@@ -4,7 +4,7 @@
 //! loaded from files and environment variables via `figment`.
 
 use figment::{
-    providers::{Env, Format, Toml},
+    providers::{Env, Format, Serialized, Toml},
     Figment,
 };
 use serde::{Deserialize, Serialize};
@@ -31,8 +31,10 @@ pub struct VisualizerConfig {
 
 impl Config {
     /// Loads configuration from `config.toml` and environment variables.
+    /// It uses the `Default` implementation as a base layer.
     pub fn load() -> Result<Self, figment::Error> {
         Figment::new()
+            .merge(Serialized::defaults(Config::default()))
             .merge(Toml::file("config.toml"))
             .merge(Env::prefixed("GOSSIP_"))
             .extract()
