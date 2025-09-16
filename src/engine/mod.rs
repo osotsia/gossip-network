@@ -5,7 +5,7 @@
 
 use crate::{
     config::Config,
-    domain::{Identity, NetworkState, SignedMessage, TelemetryData},
+    domain::{GossipPayload, Identity, NetworkState, NodeInfo, SignedMessage, TelemetryData},
     transport::{InboundMessage, TransportCommand},
 };
 use std::{
@@ -22,10 +22,11 @@ pub mod protocol;
 /// The core application logic actor.
 pub struct Engine {
     identity: Identity,
+    config: Config,
     gossip_interval: Duration,
-    gossip_factor: usize,
     node_ttl: Duration,
-    network_state: NetworkState,
+    // The canonical state of the network from this node's perspective.
+    node_info: HashMap<crate::domain::NodeId, NodeInfo>,
     known_peers: HashMap<crate::domain::NodeId, SocketAddr>,
     inbound_rx: mpsc::Receiver<InboundMessage>,
     transport_tx: mpsc::Sender<TransportCommand>,
@@ -41,11 +42,11 @@ impl Engine {
         state_tx: watch::Sender<NetworkState>,
     ) -> Self {
         Self {
-            identity,
             gossip_interval: Duration::from_millis(config.gossip_interval_ms),
-            gossip_factor: config.gossip_factor,
             node_ttl: Duration::from_millis(config.node_ttl_ms),
-            network_state: NetworkState::default(),
+            identity,
+            config,
+            node_info: HashMap::new(),
             known_peers: HashMap::new(),
             inbound_rx,
             transport_tx,
@@ -53,7 +54,6 @@ impl Engine {
         }
     }
 
-    /// The main run loop for the `Engine` service.
     pub async fn run(mut self, shutdown_token: CancellationToken) {
         tracing::info!(node_id = %self.identity.node_id, "Engine service started");
         let mut gossip_timer = time::interval(self.gossip_interval);
@@ -84,28 +84,25 @@ impl Engine {
 
     async fn handle_inbound_message(&mut self, inbound: InboundMessage) {
         if let Err(e) = inbound.message.verify() {
-            tracing::warn!(
-                from = %inbound.peer_addr,
-                error = %e,
-                "Received message with invalid signature. Discarding."
-            );
+            tracing::warn!(error = %e, "Received message with invalid signature. Discarding.");
             return;
         }
 
-        self.known_peers
-            .insert(inbound.message.originator, inbound.peer_addr);
+        self.known_peers.insert(inbound.message.originator, inbound.peer_addr);
 
-        let is_new = match self.network_state.nodes.get(&inbound.message.originator) {
-            Some(existing) => inbound.message.message.timestamp_ms > existing.timestamp_ms,
+        let is_new = match self.node_info.get(&inbound.message.originator) {
+            Some(existing) => inbound.message.message.telemetry.timestamp_ms > existing.telemetry.timestamp_ms,
             None => true,
         };
 
         if is_new {
             tracing::info!(originator = %inbound.message.originator, "Received new information");
-            self.network_state.nodes.insert(
-                inbound.message.originator,
-                inbound.message.message.clone(),
-            );
+            let node_info = NodeInfo {
+                telemetry: inbound.message.message.telemetry.clone(),
+                community_id: inbound.message.message.community_id,
+            };
+            self.node_info.insert(inbound.message.originator, node_info);
+
             self.publish_state();
             self.gossip_to_peers(inbound.message).await;
         }
@@ -117,25 +114,30 @@ impl Engine {
             .expect("Time went backwards")
             .as_millis() as u64;
 
-        let telemetry = TelemetryData {
-            timestamp_ms,
-            value: 100.0 + 50.0 * (timestamp_ms as f64 / 10000.0).sin(),
+        let payload = GossipPayload {
+            telemetry: TelemetryData {
+                timestamp_ms,
+                value: 100.0 + 50.0 * (timestamp_ms as f64 / 10000.0).sin(),
+            },
+            community_id: self.config.community_id,
         };
 
-        let signed_message = self.identity.sign(telemetry);
+        let signed_message = self.identity.sign(payload);
         tracing::info!("Generated new telemetry. Gossiping to peers...");
 
-        self.network_state.nodes.insert(
-            self.identity.node_id,
-            signed_message.message.clone(),
-        );
+        let node_info = NodeInfo {
+            telemetry: signed_message.message.telemetry.clone(),
+            community_id: signed_message.message.community_id,
+        };
+        self.node_info.insert(self.identity.node_id, node_info);
+
         self.publish_state();
         self.gossip_to_peers(signed_message).await;
     }
 
     async fn gossip_to_peers(&self, message: SignedMessage) {
         let peers_to_gossip_to =
-            protocol::select_peers(&self.known_peers, message.originator, self.gossip_factor);
+            protocol::select_peers(&self.known_peers, message.originator, self.config.gossip_factor);
 
         if peers_to_gossip_to.is_empty() {
             tracing::warn!("No peers to gossip to. Is the network empty?");
@@ -159,12 +161,10 @@ impl Engine {
         let ttl_ms = self.node_ttl.as_millis() as u64;
 
         let stale_nodes: Vec<_> = self
-            .network_state
-            .nodes
+            .node_info
             .iter()
             .filter(|(id, data)| {
-                // Do not remove self
-                **id != self.identity.node_id && (now_ms - data.timestamp_ms) > ttl_ms
+                **id != self.identity.node_id && (now_ms - data.telemetry.timestamp_ms) > ttl_ms
             })
             .map(|(id, _)| *id)
             .collect();
@@ -172,7 +172,7 @@ impl Engine {
         if !stale_nodes.is_empty() {
             tracing::info!(count = stale_nodes.len(), "Pruning stale nodes");
             for node_id in stale_nodes {
-                self.network_state.nodes.remove(&node_id);
+                self.node_info.remove(&node_id);
                 self.known_peers.remove(&node_id);
             }
             self.publish_state();
@@ -180,6 +180,16 @@ impl Engine {
     }
 
     fn publish_state(&self) {
-        let _ = self.state_tx.send(self.network_state.clone());
+        // Find the NodeIds corresponding to the bootstrap peer addresses.
+        let bootstrap_node_ids: Vec<_> = self.config.bootstrap_peers.iter().filter_map(|addr| {
+            self.known_peers.iter().find_map(|(id, peer_addr)| if peer_addr == addr { Some(*id) } else { None })
+        }).collect();
+        
+        let state = NetworkState {
+            self_id: Some(self.identity.node_id),
+            nodes: self.node_info.clone(),
+            edges: bootstrap_node_ids,
+        };
+        let _ = self.state_tx.send(state);
     }
 }
