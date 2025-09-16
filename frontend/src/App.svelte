@@ -1,31 +1,28 @@
 <script>
-  import { networkStore } from '$lib/networkStore.js';
+  import { networkStore } from '$lib/networkStore.svelte.js';
   import NetworkGraph from '$lib/NetworkGraph.svelte';
 
-  // Initiate the WebSocket connection when the app starts.
+  // Initiate the WebSocket connection once.
   networkStore.connect();
-
-  // Make the store's reactive properties available to the template.
-  const graph = $derived(networkStore.graph);
-  const status = $derived(networkStore.status);
 </script>
 
 <header>
   Gossip Network Status:
-  <span class="status {status}">
-    {status.toUpperCase()}
+  <span class="status {networkStore.status}">
+    {networkStore.status.toUpperCase()}
   </span>
-  {#if status === 'connected'}
-    | Nodes: {graph.nodes.length} | Communities: {graph.communities.size}
+  {#if networkStore.status === 'connected'}
+    | Nodes: {networkStore.graph.nodes.length} | Communities: {networkStore.graph.communities.size}
   {/if}
 </header>
 
 <main>
-  {#if status === 'connected' && graph.nodes.length > 0}
-    <NetworkGraph data={graph} />
+  {#if networkStore.status === 'connected' && networkStore.graph.nodes.length > 0}
+    <!-- Pass the reactive graph data as a prop -->
+    <NetworkGraph data={networkStore.graph} />
   {:else}
     <div class="placeholder">
-      <h1>{status.toUpperCase()}...</h1>
+      <h1>{networkStore.status.toUpperCase()}...</h1>
       <p>Waiting for connection to the gossip network visualizer node.</p>
     </div>
   {/if}
