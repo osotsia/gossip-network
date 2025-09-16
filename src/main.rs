@@ -18,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load().context("Failed to load configuration")?;
 
     // Create and run the application.
-    if let Err(e) = App::new(config).and_then(|app| app.run()) {
+    if let Err(e) = App::new(config)?.run().await {
         tracing::error!(error = %e, "💥 Application failed");
         std::process::exit(1);
     }

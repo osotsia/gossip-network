@@ -5,7 +5,7 @@
 use crate::{
     domain::SignedMessage,
     error::{Error, Result},
-    transport::InboundMessage,
+    transport::{InboundMessage, MAX_MESSAGE_SIZE},
 };
 use quinn::{Connection, Endpoint};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
@@ -74,7 +74,7 @@ pub async fn handle_connection(
             Ok(mut recv) = connection.accept_uni() => {
                 let inbound_tx = inbound_tx.clone();
                 tokio::spawn(async move {
-                    match recv.read_to_end(usize::MAX).await {
+                    match recv.read_to_end(MAX_MESSAGE_SIZE).await {
                         Ok(bytes) => {
                             match bincode::deserialize::<SignedMessage>(&bytes) {
                                 Ok(message) => {
@@ -86,7 +86,7 @@ pub async fn handle_connection(
                                 Err(e) => tracing::error!(from = %peer_addr, error = %e, "Failed to deserialize message"),
                             }
                         }
-                        Err(e) => tracing::error!(from = %peer_addr, error = %e, "Failed to read from stream"),
+                        Err(e) => tracing::error!(from = %peer_addr, error = %e, "Failed to read from stream (potential DoS: exceeded size limit)"),
                     }
                 });
             }

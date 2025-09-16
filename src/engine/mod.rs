@@ -4,6 +4,7 @@
 //! network state, generates telemetry, and applies the gossip protocol.
 
 use crate::{
+    config::Config,
     domain::{Identity, NetworkState, SignedMessage, TelemetryData},
     engine::protocol,
     transport::{InboundMessage, TransportCommand},
@@ -23,6 +24,8 @@ pub mod protocol;
 pub struct Engine {
     identity: Identity,
     gossip_interval: Duration,
+    gossip_factor: usize,
+    node_ttl: Duration,
     network_state: NetworkState,
     known_peers: HashMap<crate::domain::NodeId, SocketAddr>,
     inbound_rx: mpsc::Receiver<InboundMessage>,
@@ -33,14 +36,16 @@ pub struct Engine {
 impl Engine {
     pub fn new(
         identity: Identity,
-        gossip_interval_ms: u64,
+        config: Config,
         inbound_rx: mpsc::Receiver<InboundMessage>,
         transport_tx: mpsc::Sender<TransportCommand>,
         state_tx: watch::Sender<NetworkState>,
     ) -> Self {
         Self {
             identity,
-            gossip_interval: Duration::from_millis(gossip_interval_ms),
+            gossip_interval: Duration::from_millis(config.gossip_interval_ms),
+            gossip_factor: config.gossip_factor,
+            node_ttl: Duration::from_millis(config.node_ttl_ms),
             network_state: NetworkState::default(),
             known_peers: HashMap::new(),
             inbound_rx,
@@ -53,6 +58,7 @@ impl Engine {
     pub async fn run(mut self, shutdown_token: CancellationToken) {
         tracing::info!(node_id = %self.identity.node_id, "Engine service started");
         let mut gossip_timer = time::interval(self.gossip_interval);
+        let mut cleanup_timer = time::interval(Duration::from_secs(60));
 
         loop {
             tokio::select! {
@@ -62,6 +68,9 @@ impl Engine {
                 },
                 _ = gossip_timer.tick() => {
                     self.gossip_self_telemetry().await;
+                },
+                _ = cleanup_timer.tick() => {
+                    self.cleanup_stale_nodes();
                 },
                 Some(inbound) = self.inbound_rx.recv() => {
                     self.handle_inbound_message(inbound).await;
@@ -127,7 +136,7 @@ impl Engine {
 
     async fn gossip_to_peers(&self, message: SignedMessage) {
         let peers_to_gossip_to =
-            protocol::select_peers(&self.known_peers, message.originator, 2);
+            protocol::select_peers(&self.known_peers, message.originator, self.gossip_factor);
 
         if peers_to_gossip_to.is_empty() {
             tracing::warn!("No peers to gossip to. Is the network empty?");
@@ -140,6 +149,34 @@ impl Engine {
             if let Err(e) = self.transport_tx.send(command).await {
                 tracing::error!(error = %e, "Failed to send command to transport service");
             }
+        }
+    }
+
+    fn cleanup_stale_nodes(&mut self) {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as u64;
+        let ttl_ms = self.node_ttl.as_millis() as u64;
+
+        let stale_nodes: Vec<_> = self
+            .network_state
+            .nodes
+            .iter()
+            .filter(|(id, data)| {
+                // Do not remove self
+                **id != self.identity.node_id && (now_ms - data.timestamp_ms) > ttl_ms
+            })
+            .map(|(id, _)| *id)
+            .collect();
+
+        if !stale_nodes.is_empty() {
+            tracing::info!(count = stale_nodes.len(), "Pruning stale nodes");
+            for node_id in stale_nodes {
+                self.network_state.nodes.remove(&node_id);
+                self.known_peers.remove(&node_id);
+            }
+            self.publish_state();
         }
     }
 

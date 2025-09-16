@@ -8,13 +8,16 @@ use crate::{
     error::{Error, Result},
     transport::{connection::handle_connection, tls::configure_tls},
 };
-use quinn::{Endpoint, Connection};
+use quinn::{Connection, Endpoint};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 pub mod connection;
 pub mod tls;
+
+/// The maximum allowed size for a single incoming message on a QUIC stream.
+const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1 MiB
 
 /// Commands that can be sent to the `Transport` service.
 #[derive(Debug)]

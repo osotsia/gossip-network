@@ -6,13 +6,39 @@
 
 use axum_tungstenite::tungstenite::Message;
 use futures::{SinkExt, StreamExt};
-use gossip_network::{config::Config, domain::NetworkState, App};
-use std::{str::FromStr, time::Duration};
-use tempfile::tempdir;
-use tokio::net::TcpStream;
+use gossip_network::{domain::NetworkState, App};
+use std::time::Duration;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+use tempfile::tempdir;
 
 mod common;
+
+async fn connect_with_retry(
+    ws_url: String,
+    max_retries: u32,
+    delay: Duration,
+) -> axum_tungstenite::tungstenite::protocol::WebSocket<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+> {
+    let mut retries = 0;
+    loop {
+        match tokio_tungstenite::connect_async(&ws_url).await {
+            Ok((socket, _response)) => return socket,
+            Err(e) => {
+                retries += 1;
+                if retries > max_retries {
+                    panic!(
+                        "Failed to connect to WebSocket at {} after {} retries: {}",
+                        ws_url, max_retries, e
+                    );
+                }
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_state_propagation_across_two_nodes() {
@@ -26,8 +52,8 @@ async fn test_state_propagation_across_two_nodes() {
 
     // --- 2. Configure and Spawn Node A (The Bootstrap Node) ---
     let config_a = common::setup_test_config(&dir_a, vec![]);
-    // We need to know the address Node A will bind to *before* it starts.
-    // To do this, we bind a socket to an ephemeral port and get its address.
+    // Pre-bind a listener to an ephemeral port to discover the address.
+    // This mitigates a race condition where the port could be grabbed by another process.
     let listener_a = std::net::TcpListener::bind(config_a.p2p_addr).unwrap();
     let addr_a = listener_a.local_addr().unwrap();
     drop(listener_a); // Drop the listener so the app can bind to it.
@@ -38,11 +64,9 @@ async fn test_state_propagation_across_two_nodes() {
     let app_a = App::new(config_a_with_addr).unwrap();
     let shutdown_a = shutdown_token.clone();
     tokio::spawn(async move {
-        let _ = app_a.run();
+        let _ = app_a.run().await;
         shutdown_a.cancel(); // Signal shutdown if it exits prematurely.
     });
-    // Small delay to ensure the node is up and listening.
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // --- 3. Configure and Spawn Node B (Connects to Node A) ---
     // Node B uses Node A's address as its bootstrap peer.
@@ -57,17 +81,17 @@ async fn test_state_propagation_across_two_nodes() {
     let app_b = App::new(config_b_with_addr).unwrap();
     let shutdown_b = shutdown_token.clone();
     tokio::spawn(async move {
-        let _ = app_b.run();
+        let _ = app_b.run().await;
         shutdown_b.cancel();
     });
 
-    // --- 4. Connect to Node B's Visualizer WebSocket ---
+    // --- 4. Connect to Node B's Visualizer WebSocket with Retry ---
     let ws_url = format!("ws://{}", viz_addr_b);
-    let (mut ws_client, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
+    let mut ws_client = connect_with_retry(ws_url, 20, Duration::from_millis(100)).await;
 
     // --- 5. Verify State Propagation ---
     let test_timeout = Duration::from_secs(5);
-    let result = tokio::time::timeout(test_timeout, async {
+    let result = timeout(test_timeout, async {
         loop {
             let msg = ws_client.next().await.unwrap().unwrap();
             if let Message::Text(text) = msg {

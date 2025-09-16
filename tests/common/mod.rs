@@ -17,6 +17,8 @@ pub fn setup_test_config(dir: &TempDir, bootstrap_peers: Vec<SocketAddr>) -> Con
         p2p_addr: "127.0.0.1:0".parse().unwrap(),
         bootstrap_peers,
         gossip_interval_ms: 250, // Use a short interval for faster test execution.
+        gossip_factor: 2,
+        node_ttl_ms: 5000, // Short TTL for testing pruning.
         visualizer: Some(VisualizerConfig {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
         }),

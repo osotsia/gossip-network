@@ -144,10 +144,8 @@ for i in $(seq 0 $((NUM_NODES - 1))); do
         selected_peers=$(printf "%s\n" "${potential_peers[@]}" | shuf -n "$num_peers_to_connect")
         peers_toml_array=$(echo "$selected_peers" | awk '{print "\""$0"\""}' | paste -sd, -)
 
-        # Append the bootstrap_peers list to the config file.
-        # We use `sed` to replace the empty list with our new list.
-        sed -i.bak "s/bootstrap_peers = \[\]/bootstrap_peers = [$peers_toml_array]/" "$CONFIG_PATH"
-        rm "${CONFIG_PATH}.bak" # Clean up sed's backup file
+        # Append the bootstrap_peers list to the config file portably.
+        sed "s/bootstrap_peers = \[\]/bootstrap_peers = [$peers_toml_array]/" "$CONFIG_PATH" > "$CONFIG_PATH.tmp" && mv "$CONFIG_PATH.tmp" "$CONFIG_PATH"
 
         echo "node-$i will connect to $num_peers_to_connect peer(s)."
     else

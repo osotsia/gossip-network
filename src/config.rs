@@ -18,6 +18,8 @@ pub struct Config {
     pub p2p_addr: SocketAddr,
     pub bootstrap_peers: Vec<SocketAddr>,
     pub gossip_interval_ms: u64,
+    pub gossip_factor: usize,
+    pub node_ttl_ms: u64,
     pub visualizer: Option<VisualizerConfig>,
 }
 
@@ -44,6 +46,8 @@ impl Default for Config {
             p2p_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 5000),
             bootstrap_peers: Vec::new(),
             gossip_interval_ms: 5000,
+            gossip_factor: 2,
+            node_ttl_ms: 300000, // 5 minutes
             visualizer: None,
         }
     }
@@ -60,6 +64,8 @@ mod tests {
             p2p_addr: "127.0.0.1:1234".parse().unwrap(),
             bootstrap_peers: vec!["127.0.0.1:5678".parse().unwrap()],
             gossip_interval_ms: 100,
+            gossip_factor: 3,
+            node_ttl_ms: 60000,
             visualizer: Some(VisualizerConfig {
                 bind_addr: "127.0.0.1:8080".parse().unwrap(),
             }),
@@ -74,6 +80,8 @@ mod tests {
                 p2p_addr = "127.0.0.1:1234"
                 bootstrap_peers = ["127.0.0.1:5678"]
                 gossip_interval_ms = 100
+                gossip_factor = 3
+                node_ttl_ms = 60000
                 [visualizer]
                 bind_addr = "127.0.0.1:8080"
             "#;

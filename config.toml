@@ -14,6 +14,13 @@ bootstrap_peers = []
 # How often to create and gossip a new message (in milliseconds).
 gossip_interval_ms = 5000
 
+# The number of peers to forward a new piece of information to.
+gossip_factor = 2
+
+# How long to keep information about a node before considering it stale
+# and removing it from the state (in milliseconds). 5 minutes by default.
+node_ttl_ms = 300000
+
 # Uncomment the following section to enable the web visualizer.
 # [visualizer]
 # bind_addr = "127.0.0.1:8080"

@@ -39,7 +39,7 @@ impl App {
     ///      asynchronous Tokio task.
     ///   4. Waits for a shutdown signal (like Ctrl+C) and gracefully
     ///      terminates all tasks.
-    pub fn run(self) -> Result<()> {
+    pub async fn run(self) -> Result<()> {
         let identity = Identity::from_file(&self.config.identity_path)?;
 
         tracing::info!(
@@ -62,14 +62,13 @@ impl App {
             transport_command_rx,
             inbound_message_tx,
         )?;
-        let transport_task =
-            tokio::spawn(transport.run(self.shutdown_token.clone()));
+        let transport_task = tokio::spawn(transport.run(self.shutdown_token.clone()));
         tracing::debug!("Transport service spawned.");
 
         // Engine: The core application logic.
         let engine = Engine::new(
             identity,
-            self.config.gossip_interval_ms,
+            self.config.clone(),
             inbound_message_rx,
             transport_command_tx,
             network_state_tx,
@@ -96,26 +95,22 @@ impl App {
         });
 
         // --- Await Service Termination ---
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        rt.block_on(async {
-            // Await the shutdown signal.
-            self.shutdown_token.cancelled().await;
+        self.shutdown_token.cancelled().await;
 
-            // The tasks will complete once the shutdown token is cancelled.
-            // We await them to ensure they finish cleanly.
-            if let Err(e) = transport_task.await {
-                tracing::error!(error = ?e, "Transport service task failed");
+        // The tasks will complete once the shutdown token is cancelled.
+        // We await them to ensure they finish cleanly.
+        if let Err(e) = transport_task.await {
+            tracing::error!(error = ?e, "Transport service task failed");
+        }
+        if let Err(e) = engine_task.await {
+            tracing::error!(error = ?e, "Engine service task failed");
+        }
+        if let Some(task) = api_task {
+            if let Err(e) = task.await {
+                tracing::error!(error = ?e, "API server task failed");
             }
-            if let Err(e) = engine_task.await {
-                tracing::error!(error = ?e, "Engine service task failed");
-            }
-            if let Some(task) = api_task {
-                if let Err(e) = task.await {
-                    tracing::error!(error = ?e, "API server task failed");
-                }
-            }
-            tracing::info!("👋 Node has shut down gracefully.");
-        });
+        }
+        tracing::info!("👋 Node has shut down gracefully.");
 
         Ok(())
     }
