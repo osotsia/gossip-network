@@ -1,22 +1,27 @@
 //! src/main.rs
 //!
-//! The entrypoint for the gossip network binary.
-//!
-//! This file is intentionally minimal. Its sole responsibilities are:
-//!   - Setting up the asynchronous `tokio` runtime.
-//!   - Initializing the logger.
-//!   - Calling the main `run` function from our library crate.
+//! Binary entry point. Responsible for initializing tracing, loading
+//! configuration, instantiating the main `App`, and running it.
 
-use gossip_network::run;
+use anyhow::Context;
+use gossip_network::{App, Config};
 
 #[tokio::main]
-async fn main() {
-    // Initialize the logger. `RUST_LOG=info` will print all info-level logs
-    // and below (warn, error). Use `RUST_LOG=debug` or `RUST_LOG=trace` for more detail.
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+async fn main() -> anyhow::Result<()> {
+    // Initialize the tracing subscriber.
+    // RUST_LOG=info will be the default.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
 
-    if let Err(e) = run().await {
-        log::error!("💥 Application failed to run: {}", e);
+    // Load configuration.
+    let config = Config::load().context("Failed to load configuration")?;
+
+    // Create and run the application.
+    if let Err(e) = App::new(config).and_then(|app| app.run()) {
+        tracing::error!(error = %e, "💥 Application failed");
         std::process::exit(1);
     }
+
+    Ok(())
 }
