@@ -1,0 +1,19 @@
+# Default configuration for gossip-network.
+#
+# This node's persistent cryptographic identity file.
+identity_path = "identity.key"
+
+# The address and port for other nodes to connect to.
+p2p_addr = "127.0.0.1:5000"
+
+# A list of peers to try connecting to on startup.
+# To start a second node, create a `config2.toml` with a different p2p_addr
+# and set bootstrap_peers = ["127.0.0.1:5000"].
+bootstrap_peers = []
+
+# How often to create and gossip a new message (in milliseconds).
+gossip_interval_ms = 5000
+
+# Uncomment the following section to enable the web visualizer.
+# [visualizer]
+# bind_addr = "127.0.0.1:8080"
