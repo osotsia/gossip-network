@@ -42,3 +42,44 @@ pub fn configure_tls() -> Result<(ServerConfig, ClientConfig)> {
 
     Ok((server_config, client_config))
 }
+
+/*
+--------------------------------------------------------------------------------
+-- HOW TO GENERATE CERTIFICATES FOR THE PRIVATE PKI
+--------------------------------------------------------------------------------
+This setup requires a private Public Key Infrastructure (PKI) to ensure that
+only authorized nodes can connect to each other. A simple tool like `minica`
+can be used for this.
+
+The following steps must be completed before running the application.
+
+1. Install `minica` (requires Go):
+   go install github.com/jsha/minica@latest
+
+2. Create a directory for certificates at the project root:
+   mkdir certs
+   cd certs
+
+3. Generate the Certificate Authority (CA) and a certificate for "localhost".
+   All our nodes will use the "localhost" server name for TLS SNI.
+   minica --domains localhost
+
+   This will create:
+     - `minica.pem` and `minica.key` (The CA)
+     - `localhost/cert.pem` and `localhost/key.pem` (The node's certificate)
+
+4. Convert the PEM files to the DER format that rustls expects:
+   openssl x509 -outform der -in minica.pem -out ca.cert
+   openssl x509 -outform der -in localhost/cert.pem -out node.cert
+   openssl pkcs8 -topk8 -nocrypt -outform der -in localhost/key.pem -out node.key
+
+5. Verify the `certs/` directory. It should now contain:
+   - ca.cert
+   - node.cert
+   - node.key
+
+For this demonstration project, all nodes in the network will share these same
+three files. In a real-world system, each node would have its own unique
+`node.cert` and `node.key` files, all signed by the same central `ca.cert`.
+--------------------------------------------------------------------------------
+*/
