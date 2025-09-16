@@ -37,14 +37,18 @@ The system is designed as a set of isolated, concurrent services communicating v
 
 ## FAQ
 
-**Q: Why use a gossip protocol instead of just broadcasting messages to all known peers?**
+**Q1: Why use a gossip protocol instead of just broadcasting messages to all known peers?**
 
 A: Broadcasting creates network storms in dense networks (O(N²) message complexity) and is brittle; if a central node fails, the network can be partitioned. Gossip is more scalable and resilient. By sending messages to a small, random subset of peers, it reduces redundant traffic and ensures information can bypass failed nodes, propagating through the network like a rumor.
 
-**Q: How does this system establish trust between nodes?**
+**Q2: How does this system establish trust between nodes?**
 
 A: Trust is established at two layers. First, at the **transport layer**, QUIC connections are only permitted between nodes that present a TLS certificate signed by a shared, private Certificate Authority (CA). This prevents unauthorized machines from even joining the network. Second, at the **application layer**, every piece of telemetry data is individually signed by the originator's ED25519 private key. This proves data authenticity and integrity, ensuring that a compromised node cannot forge messages on behalf of other nodes.
 
-**Q: The visualizer shows the state of the whole network. Does this mean one node has perfect, real-time information?**
+**Q3: The visualizer shows the state of the whole network. Does this mean one node has perfect, real-time information?**
 
 A: No, and this demonstrates a key principle of distributed systems. The visualizer shows the network state *from the perspective of a single designated node*. This view is subject to **eventual consistency**. Due to network latency, this node's state will always lag slightly behind the true state of the network. Watching the graph allows you to observe this propagation delay in real-time as new nodes appear and values update.
+
+**Q4: If an attacker compromises one node, can they see and attack the entire network?**
+
+A: No. An attacker cannot map the entire network topology. They only discover the IP addresses of the small, random subset of peers they are directly connected to. This partial visibility makes it difficult to launch targeted network-level attacks (e.g., DDoS) against specific, non-adjacent nodes. While the attacker will eventually learn the cryptographic *identities* of all nodes as state propagates, they cannot forge messages (prevented by ED25519 signatures) or decrypt traffic between other honest peers (prevented by QUIC's TLS 1.3 encryption).
