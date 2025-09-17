@@ -74,7 +74,7 @@ To shut down all node processes gracefully, press `Ctrl+C` in the terminal where
 
 ## Architecture
 
-The system is designed as a set of isolated, concurrent services communicating via asynchronous channels. For a detailed breakdown of the design, components, and data flow, see [architecture.md](architecture.md).
+The system is designed as a set of isolated, concurrent services communicating via asynchronous channels. For a detailed breakdown of the design, components, and data flow, see the documentation in docs/.
 
 ## FAQ
 
