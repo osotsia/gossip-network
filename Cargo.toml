@@ -12,6 +12,9 @@ name = "gossip_network"
 path = "src/lib.rs"
 
 [dependencies]
+
+socket2 = "0.5"
+
 # Async Runtime & Utilities
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"

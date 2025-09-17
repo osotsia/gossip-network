@@ -50,6 +50,7 @@ INTER_RATIO=$4
 CLUSTER_DIR="cluster"
 BASE_P2P_PORT=5000
 VISUALIZER_PORT=8080
+PROJECT_ROOT=$(pwd) # Capture the absolute path of the project root
 
 PIDS=()
 
@@ -69,11 +70,35 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- Pre-flight Checks ---
-echo "--- Preparing environment ---"
-if [ ! -d "certs" ] || [ ! -f "certs/ca.cert" ]; then
-    echo "Error: 'certs' directory not found." && exit 1
+# --- Phase 0: Pre-flight Checks and CA Setup ---
+echo "--- Preparing environment (Phase 0) ---"
+
+# Check for dependencies
+if ! command -v minica &> /dev/null; then
+    echo "Error: 'minica' command not found. Please install it (go install github.com/jsha/minica@latest)."
+    exit 1
 fi
+if ! command -v openssl &> /dev/null; then
+    echo "Error: 'openssl' command not found. Please install it."
+    exit 1
+fi
+
+# Create CA if it doesn't exist
+if [ ! -f "certs/ca.cert" ] || [ ! -f "certs/ca.key" ]; then
+    echo "CA not found. Generating new Certificate Authority in ./certs/..."
+    rm -rf certs
+    mkdir -p certs
+    (
+        cd certs
+        minica --domains localhost >/dev/null 2>&1
+        mv minica-key.pem ca.key
+        mv minica.pem ca.cert.pem
+        openssl x509 -outform der -in ca.cert.pem -out ca.cert
+        rm -rf localhost/
+    )
+    echo "CA generated successfully."
+fi
+
 if [ ! -d "frontend/dist" ]; then
     echo "Error: 'frontend/dist' directory not found. Please build the frontend." && exit 1
 fi
@@ -83,8 +108,9 @@ echo "Creating cluster directory: $CLUSTER_DIR"
 rm -rf "$CLUSTER_DIR"
 mkdir -p "$CLUSTER_DIR"
 
-# --- Phase 1: Generate Node Configurations ---
-echo "--- Generating node configurations (Phase 1) ---"
+
+# --- Phase 1: Generate Node Configurations and Unique Certificates ---
+echo "--- Generating node configurations and certificates (Phase 1) ---"
 P2P_ADDRESSES=()
 COMMUNITY_IDS=()
 for i in $(seq 0 $((NUM_NODES - 1))); do
@@ -116,8 +142,24 @@ bind_addr = "127.0.0.1:$VISUALIZER_PORT"
 EOF
         cp -r frontend/dist "$NODE_DIR/"
     fi
-    cp -r certs "$NODE_DIR/"
-    echo "Generated config for node-$i (Community $COMMUNITY_ID)"
+    
+    NODE_CERTS_DIR="$NODE_DIR/certs"
+    mkdir -p "$NODE_CERTS_DIR"
+    cp certs/ca.cert "$NODE_CERTS_DIR/"
+
+    MINICA_OUT_DIR=$(mktemp -d)
+    NODE_DOMAIN="node-${i}.local"
+
+    (
+        cd "$MINICA_OUT_DIR"
+        minica --ca-cert "${PROJECT_ROOT}/certs/ca.cert.pem" --ca-key "${PROJECT_ROOT}/certs/ca.key" --domains "${NODE_DOMAIN},localhost"
+    ) >/dev/null 2>&1
+
+    openssl x509 -outform der -in "${MINICA_OUT_DIR}/${NODE_DOMAIN}/cert.pem" -out "${NODE_CERTS_DIR}/node.cert"
+    openssl pkcs8 -topk8 -nocrypt -outform der -in "${MINICA_OUT_DIR}/${NODE_DOMAIN}/key.pem" -out "${NODE_CERTS_DIR}/node.key"
+    
+    rm -rf "$MINICA_OUT_DIR"
+    echo "Generated unique certificate for node-$i (Community $COMMUNITY_ID)"
 done
 
 # --- Phase 2: Calculate and Assign Bootstrap Peers ---
@@ -147,7 +189,6 @@ for i in $(seq 0 $((NUM_NODES - 1))); do
         selected_peers+=$(printf "%s\n" "${intra_community_peers[@]}" | awk 'BEGIN{srand()}{print rand() "\t" $0}' | sort -n | cut -f2- | head -n "$num_intra")
     fi
     if [ "$num_inter" -gt 0 ]; then
-        # Add a newline if intra peers were already selected
         [ -n "$selected_peers" ] && selected_peers+=$'\n'
         selected_peers+=$(printf "%s\n" "${inter_community_peers[@]}" | awk 'BEGIN{srand()}{print rand() "\t" $0}' | sort -n | cut -f2- | head -n "$num_inter")
     fi
@@ -163,15 +204,28 @@ done
 
 # --- Phase 3: Launch All Nodes ---
 echo "--- Launching $NUM_NODES nodes ---"
+
+# --- FIX: Use an absolute path for the PID file to prevent subshell path errors ---
+PIDS_FILE="${PROJECT_ROOT}/${CLUSTER_DIR}/pids.txt"
+> "$PIDS_FILE"
+
 for i in $(seq 0 $((NUM_NODES - 1))); do
     NODE_DIR="$CLUSTER_DIR/node-$i"
+    # Execute node in a subshell to isolate the 'cd' command
     (
         cd "$NODE_DIR"
-        ../../target/release/gossip-network > node.log 2>&1 &
-        PIDS+=($!)
-        echo "Launched node-$i (PID: $!)"
+        # Run the binary using an absolute path
+        "${PROJECT_ROOT}/target/release/gossip-network" > node.log 2>&1 &
+        # Store the PID of the background process in the shared file using its absolute path
+        echo $! >> "$PIDS_FILE"
     )
 done
+
+# Replace non-portable `mapfile` with a `while read` loop
+PIDS=()
+while IFS= read -r pid; do
+    PIDS+=("$pid")
+done < "$PIDS_FILE"
 
 # --- Wait for Interruption ---
 echo ""

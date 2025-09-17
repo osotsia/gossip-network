@@ -8,7 +8,9 @@ use crate::{
     error::Result,
     transport::{connection::handle_connection, tls::configure_tls},
 };
-use quinn::{Connection, Endpoint};
+// --- MODIFICATION: Add TokioRuntime to the import list ---
+use quinn::{Connection, Endpoint, TokioRuntime};
+use socket2::{Domain, Protocol, Socket, Type};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -49,7 +51,27 @@ impl Transport {
         inbound_tx: mpsc::Sender<InboundMessage>,
     ) -> Result<Self> {
         let (server_config, client_config) = configure_tls()?;
-        let mut endpoint = Endpoint::server(server_config, bind_addr)?;
+
+        // Manually create the underlying UDP socket to set SO_REUSEADDR.
+        let socket = Socket::new(
+            Domain::for_address(bind_addr),
+            Type::DGRAM,
+            Some(Protocol::UDP),
+        )?;
+        socket.set_reuse_address(true)?;
+        socket.bind(&bind_addr.into())?;
+        let std_socket: std::net::UdpSocket = socket.into();
+        std_socket.set_nonblocking(true)?;
+
+        // --- MODIFICATION: Provide the correct quinn::TokioRuntime ---
+        // Create the Quinn endpoint using the pre-configured socket and the
+        // Tokio-specific runtime provided by the `quinn` crate.
+        let mut endpoint = Endpoint::new(
+            Default::default(),
+            Some(server_config),
+            std_socket,
+            Arc::new(TokioRuntime), // This is the fix.
+        )?;
         endpoint.set_default_client_config(client_config);
 
         Ok(Self {
@@ -111,10 +133,6 @@ impl Transport {
                 let endpoint = self.endpoint.clone();
                 let connections = self.connections.clone();
                 tokio::spawn(async move {
-                    // MODIFICATION: Change log level from `error` to `warn`.
-                    // A failed message send to a single peer is a routine network event,
-                    // not a critical application error. The gossip protocol is designed
-                    // to tolerate this.
                     if let Err(e) = connection::send_message_to_peer(endpoint, connections, addr, msg).await {
                         tracing::warn!(peer = %addr, error = %e, "Failed to send message");
                     }
