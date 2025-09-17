@@ -11,7 +11,7 @@ use rand::{rngs::OsRng, RngCore};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 // FIX: Merged use statements.
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap},
     fmt, fs, io,
     path::Path,
 };
