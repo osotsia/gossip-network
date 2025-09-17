@@ -34,21 +34,25 @@ The errors are categorized as follows:
 ### 2. Critical Implementation Errors
 
 #### 2.1. Unbounded Task Spawning and Resource Exhaustion DoS
+*   **Status:** FIXED
 *   **Observation:** In `src/transport/connection.rs`, the `handle_connection` function enters a loop that accepts unidirectional streams (`connection.accept_uni()`). For each accepted stream, it spawns a new Tokio task (`tokio::spawn`) to handle reading the message. There is no limit on the number of concurrent streams a single peer can open or the number of concurrent tasks spawned.
 *   **Impact:** A malicious peer can connect and open millions of streams without sending any data. The receiving node will spawn a corresponding number of tasks, consuming scheduler resources and memory until the process crashes. This is a severe and easily exploitable remote denial-of-service vulnerability.
 *   **Correction:** Concurrency must be bounded. This can be achieved using a `tokio::sync::Semaphore` to limit the number of active stream-handling tasks or by using a library like `tokio::task::JoinSet` combined with a size limit.
 
-#### 2.2. Shared TLS Private Key Defeats Transport-Layer Security -- FIXED
+#### 2.2. Shared TLS Private Key Defeats Transport-Layer Security
+*   **Status:** FIXED
 *   **Observation:** The documentation and setup in `src/transport/tls.rs` instruct the user to generate a single `node.key` and `node.cert` to be shared by all nodes in the network. The orchestrator script copies this same `certs` directory to every node instance.
 *   **Impact:** This practice completely undermines the purpose of transport-layer security (TLS/QUIC). The primary goal of TLS here is to authenticate the remote peer (the machine/process). If all nodes share the same private key, an attacker who compromises *one* node can extract this key. With it, they can impersonate *any other node* at the transport layer, enabling man-in-the-middle attacks against any other peer. While application-layer signatures (ED25519) still prevent message forgery, the transport-layer encryption and authentication guarantees are void.
 *   **Analysis:** The comment in `tls.rs` correctly notes this is a simplification. However, its security implication is critical and should be highlighted as a primary vulnerability. In a real system, the private CA would issue a unique certificate/key pair for each node.
 
 #### 2.3. Network Topology Visualization is Misleading
+*   **Status:** FIXED
 *   **Observation:** The `NetworkState` struct sent to the visualizer contains a field `edges: Vec<NodeId>`. In `src/engine/mod.rs`, this field is populated with the keys from `self.known_peers`. The frontend (`networkStore.svelte.ts`) then renders these as links from `self_id` to each peer in the `edges` list.
 *   **Impact:** The visualization does not show the actual peer-to-peer mesh topology of the network. It only shows a star graph with the designated visualizer node at the center and a direct link to every other peer it knows the address of. This provides an incorrect mental model of how information flows. The FAQ (`Q3`) correctly states the view is from a single node, but the implementation of `edges` is not a list of established P2P connections; it is a list of potential gossip targets.
 *   **Analysis:** This is an error in data representation. To show a more accurate local topology, `edges` should represent the list of active QUIC connections managed by the `Transport` service, not the list of all peers known to the `Engine`.
 
 #### 2.4. Memory Leak via Unbounded `known_peers` Map
+*   **Status:** FIXED
 *   **Observation:** The `cleanup_stale_nodes` function in `src/engine/mod.rs` prunes entries from `self.node_info` but does not prune corresponding entries from `self.known_peers`. An entry is added to `known_peers` whenever a valid signed message is received from a new originator.
 *   **Impact:** An attacker can execute a variation of the Sybil attack by creating a large number of identities and sending one valid message from each. These identities will be added to `known_peers` and will never be removed, even after their corresponding `node_info` entry becomes stale and is pruned. This leads to unbounded memory growth in the `Engine` and constitutes a memory leak DoS vulnerability.
 *   **Analysis:** The lifecycle of an entry in `known_peers` must be tied to the lifecycle of its corresponding entry in `node_info`. When a node is pruned for being stale, its entry should be removed from all state maps.
@@ -78,6 +82,7 @@ The errors are categorized as follows:
 *   **Analysis:** Production-grade network protocols typically use schema-based serialization formats like Protocol Buffers or Avro, which are designed to be forward- and backward-compatible. At a minimum, a version field should be added to the message header to allow for graceful handling of messages from incompatible nodes.
 
 #### 3.5. Inefficient Full-State Synchronization for Visualization
+*   **Status:** FIXED
 *   **Observation:** The `NetworkState` struct, which is serialized to JSON and sent to the visualizer, contains the complete `nodes` map and `edges` list. On every state change, the entire object is re-serialized and broadcast.
 *   **Impact:** As the number of nodes in the network grows into the hundreds or thousands, the `NetworkState` JSON object can become very large. Broadcasting this entire object on every minor update is inefficient, consuming significant CPU for serialization and network bandwidth. This will lead to poor frontend performance and high operational costs.
 *   **Analysis:** A more scalable design for state synchronization would use incremental updates. The initial message to a new WebSocket client could be the full state, but subsequent messages should only describe the delta (e.g., "Node X updated telemetry," "Node Y was added"). This reduces the data transfer size significantly in a large network.
@@ -98,3 +103,23 @@ cargo build --release
 RUST_LOG=info,gossip_network::engine=debug ./orchestrator.sh 10 2 0.8 0.1
 or
 ~/.cargo/bin/websocat ws://127.0.0.1:8080/ws | jq
+
+
+
+### 5. New Issues Identified
+
+#### 5.1. Protocol and Logic Issues
+
+*   **Unauthenticated Peer Identity in Handshake:** The system does not bind the transport-layer identity (from the TLS certificate) to the application-layer identity (`NodeId`). When `handle_inbound_message` receives a message, it trusts that the `peer_addr` provided by the transport layer is the correct address for the `originator` `NodeId` inside the signed payload. A compromised node (Node C) could establish a connection with Node B, then forward a valid message it received from Node A. Node B would incorrectly update its `known_peers` map, associating Node A's `NodeId` with Node C's address. This enables routing table poisoning and eclipse attacks. A proper handshake should involve each peer signing a message containing their public key and sending it immediately upon connection, allowing the remote peer to verify that the claimed `NodeId` matches the transport identity.
+
+*   **Unimplemented Community-Aware Gossip:** The configuration (`src/config.rs`) and data structures (`src/domain.rs`) were updated to include a `community_id`. The orchestrator script uses this to create network partitions. However, the gossip peer selection logic in `src/engine/protocol.rs` (`select_peers`) is unaware of communities; it selects peers randomly from the entire `known_peers` set. This represents a missed optimization. The gossip protocol could be made more efficient by prioritizing gossip to peers within the same community, reducing redundant cross-community traffic.
+
+#### 5.2. Security and Resource Management Issues
+
+*   **Memory Allocation Vulnerability in Stream Handling:** In `src/transport/connection.rs`, the stream handling logic uses `recv.read_to_end(MAX_MESSAGE_SIZE)`. This method attempts to allocate a buffer of up to 1 MiB for each incoming stream. While the semaphore limits the number of concurrent tasks, an attacker can still open `MAX_CONCURRENT_STREAMS` (256) streams simultaneously. This would cause the receiver to attempt to allocate 256 MiB of memory almost instantly, potentially leading to memory exhaustion. A more resilient implementation would read from the stream in smaller, fixed-size chunks into a pre-allocated buffer.
+
+*   **Race Condition in Orchestrator CA Generation:** The `orchestrator.sh` script checks for the existence of `certs/ca.cert` to determine whether to generate a new Certificate Authority. This is not an atomic operation. If multiple instances of the script are run concurrently against the same directory, one may delete the `certs` directory while another has already passed the existence check, leading to a race condition and script failure. A file-based lock should be used to ensure exclusive access during CA generation.
+
+#### 5.3. Performance Issues
+
+*   **Contention on Global Connection Cache:** The `Transport` service uses a single `Arc<Mutex<HashMap<...>>>` for its connection cache (`connections`). All connection establishment, lookup, and removal operations require acquiring this lock. In a scenario with high connection churn or many concurrent gossip messages, this single mutex could become a contention bottleneck, limiting the networking throughput of the node. Using a concurrent hash map, such as `dashmap`, would likely provide better performance under load.

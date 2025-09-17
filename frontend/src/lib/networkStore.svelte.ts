@@ -1,92 +1,115 @@
-import * as d3 from 'd3';
-import type { ConnectionStatus, GraphData, NetworkState, SimulationLink, SimulationNode } from '$lib/types';
+// src/lib/networkStore.ts
+import type { NodeId, NodeInfo, WebSocketMessage, UpdatePayload } from './types';
 
-// Create a single reactive `$state` object. This guarantees that `store.graph`
-// has a valid, non-null initial value from the moment the module is loaded.
-const store = $state({
-    status: 'connecting' as ConnectionStatus,
-    graph: {
-        nodes: [],
-        links: [],
-        selfId: null,
-        communities: new Map(),
-    } as GraphData,
-    rawNetworkState: null as NetworkState | null,
-    initialized: false,
-});
+// --- State Definition (using Svelte 5 runes) ---
+let isConnected = $state(false);
+let selfId: NodeId | null = $state(null);
+let nodes = $state<Record<NodeId, NodeInfo>>({});
+let activeConnections = $state<Set<NodeId>>(new Set());
 
-// This effect listens for changes to the raw state and recalculates the graph.
-// It is still an "orphaned" effect, but it corrects the fatal TypeError.
-$effect(() => {
-	const state = store.rawNetworkState;
+export interface LogEntry {
+    id: number;
+    timestamp: Date;
+    message: string;
+    type: 'info' | 'warn' | 'success' | 'error';
+}
+let log = $state<LogEntry[]>([]);
+let logCounter = 0;
 
-	if (!state || !state.nodes) {
-        // Explicitly reset the graph to its empty state if raw data is cleared.
-        store.graph = {
-			nodes: [],
-			links: [],
-			selfId: null,
-			communities: new Map(),
-		};
-		return;
-	}
+// --- Helper Functions ---
+const truncateNodeId = (id: NodeId) => `${id.substring(0, 8)}...`;
 
-	const nodes = Object.entries(state.nodes).map(([id, info]) => ({ id, ...info }));
-	const links: SimulationLink[] =
-		state.self_id && state.edges
-			? state.edges
-					.map((targetId) => ({ source: state.self_id!, target: targetId }))
-					.filter((link) => state.nodes[link.target as string])
-			: [];
-	
-	const degrees = new Map<string, number>(nodes.map((n) => [n.id, 0]));
-	links.forEach((link) => {
-		degrees.set(link.source as string, (degrees.get(link.source as string) ?? 0) + 1);
-		degrees.set(link.target as string, (degrees.get(link.target as string) ?? 0) + 1);
-	});
-
-	const communities = new Map<number, number>(nodes.map((n) => [n.community_id, 0]));
-	const colorScale = d3.scaleOrdinal(d3.schemeTableau10).domain([...communities.keys()].map(String));
-
-	const simulationNodes: SimulationNode[] = nodes.map((node) => ({
-		...node,
-		radius: 4 + (degrees.get(node.id) ?? 0) * 4,
-		color: colorScale(String(node.community_id)),
-	}));
-	
-    // Atomically assign the newly computed graph object.
-	store.graph = {
-		nodes: simulationNodes,
-		links: links,
-		selfId: state.self_id,
-		communities: communities,
-	};
-});
-
-function init() {
-	if (store.initialized) return;
-	store.initialized = true;
-	const wsUrl = `ws://${window.location.host}/ws`;
-	const ws = new WebSocket(wsUrl);
-	ws.onopen = () => {
-		store.status = 'connected';
-	};
-	ws.onmessage = (event) => {
-		store.rawNetworkState = JSON.parse(event.data);
-	};
-	ws.onclose = () => {
-		console.warn('[Store] WebSocket CLOSED.');
-		store.status = 'disconnected';
-		store.initialized = false;
-		setTimeout(init, 3000);
-	};
-	ws.onerror = (error) => console.error('[Store] WebSocket ERROR:', error);
+function addLogEntry(message: string, type: LogEntry['type']) {
+    log.unshift({ id: logCounter++, timestamp: new Date(), message, type });
+    if (log.length > 200) { // Keep the log from growing indefinitely
+        log.pop();
+    }
 }
 
-// --- PUBLIC API ---
-// The public API surface remains identical to consumers.
+function formatUpdateMessage(payload: UpdatePayload): string {
+    const { event, data } = payload;
+    switch (event) {
+        case 'node_added':
+            return `Discovered new node: ${truncateNodeId(data.id)} (Community ${data.info.community_id})`;
+        case 'node_updated':
+            return `Received telemetry update from node: ${truncateNodeId(data.id)}`;
+        case 'node_removed':
+            return `Node considered stale and removed: ${truncateNodeId(data.id)}`;
+        case 'connection_status':
+            return `Peer connection ${data.is_connected ? 'established with' : 'lost from'} ${truncateNodeId(data.peer_id)}`;
+    }
+}
+
+// --- WebSocket Connection Logic ---
+function connect() {
+    const wsUrl = `ws://${window.location.host}/ws`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+        isConnected = true;
+        addLogEntry('Connected to WebSocket server.', 'success');
+    };
+
+    ws.onclose = () => {
+        isConnected = false;
+        selfId = null;
+        nodes = {};
+        activeConnections.clear();
+        addLogEntry('Disconnected from WebSocket server. Retrying in 3s...', 'error');
+        setTimeout(connect, 3000); // Simple retry mechanism
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            const data: WebSocketMessage = JSON.parse(event.data);
+
+            if (data.type === 'snapshot') {
+                const payload = data.payload;
+                selfId = payload.self_id;
+                nodes = payload.nodes;
+                activeConnections = new Set(payload.active_connections);
+                addLogEntry(`Received initial state snapshot with ${Object.keys(nodes).length} nodes.`, 'info');
+            } else if (data.type === 'update') {
+                const payload = data.payload;
+                const { event, data: eventData } = payload;
+
+                switch (event) {
+                    case 'node_added':
+                    case 'node_updated':
+                        nodes[eventData.id] = eventData.info;
+                        break;
+                    case 'node_removed':
+                        delete nodes[eventData.id];
+                        break;
+                    case 'connection_status':
+                        if (eventData.is_connected) {
+                            activeConnections.add(eventData.peer_id);
+                        } else {
+                            activeConnections.delete(eventData.peer_id);
+                        }
+                        break;
+                }
+                // Add a formatted log message for the update
+                addLogEntry(formatUpdateMessage(payload), 'info');
+            }
+        } catch (error) {
+            console.error('Failed to process WebSocket message:', error);
+            addLogEntry('Received an invalid WebSocket message.', 'warn');
+        }
+    };
+
+    ws.onerror = (err) => {
+        console.error('WebSocket error:', err);
+    };
+}
+
+// --- Exported Store API ---
 export const networkStore = {
-	get status() { return store.status; },
-	get graph() { return store.graph; },
-	init,
+    get isConnected() { return isConnected; },
+    get selfId() { return selfId; },
+    get nodes() { return nodes; },
+    get activeConnections() { return activeConnections; },
+    get log() { return log; },
+    connect,
+    truncateNodeId
 };
