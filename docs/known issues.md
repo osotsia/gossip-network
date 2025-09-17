@@ -110,17 +110,6 @@ The errors are categorized as follows:
 
 *   **Contention on Global Connection Cache:** The `Transport` service uses a single `Arc<Mutex<HashMap<...>>>` for its connection cache (`connections`). All connection establishment, lookup, and removal operations require acquiring this lock. In a scenario with high connection churn or many concurrent gossip messages, this single mutex could become a contention bottleneck, limiting the networking throughput of the node. Using a concurrent hash map, such as `dashmap`, would likely provide better performance under load.
 
----
-
-### 5. Logging Tips
-
-#### Clean and build the project with the changes
-cargo build --release
-
-#### Run the orchestrator with the appropriate log level
-RUST_LOG=info,gossip_network::engine=debug ./orchestrator.sh 10 2 0.8 0.1
-or
-~/.cargo/bin/websocat ws://127.0.0.1:8080/ws | jq
 
 ---
 
@@ -136,3 +125,15 @@ or
 | **Tooling & Build Process** | **8/10** | Modern toolchain with a powerful, albeit dependency-heavy, orchestration script. |
 
 **Final Rating: 8.3 / 10**
+
+---
+
+### Logging Tips
+
+#### Clean and build the project with the changes
+cargo build --release
+
+#### Run the orchestrator with the appropriate log level
+RUST_LOG=info,gossip_network::engine=debug ./orchestrator.sh 10 2 0.8 0.1
+or
+~/.cargo/bin/websocat ws://127.0.0.1:8080/ws | jq
