@@ -5,13 +5,16 @@
 //! the concepts of data representation (model) and identity (crypto).
 
 use crate::error::{Error, Result};
-use ed25519_dalek::{
-    Signature, Signer, SigningKey, Verifier, VerifyingKey,
-};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::{rngs::OsRng, RngCore};
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt, fs, io, path::Path};
-
+// MODIFICATION: Add serde imports  custom serialization.
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
+// FIX: Merged use statements.
+use std::{
+    collections::{HashMap, HashSet},
+    fmt, fs, io,
+    path::Path,
+};
 // --- Cryptographic Identity ---
 #[derive(Debug)]
 pub struct Identity {
@@ -62,8 +65,34 @@ impl Identity {
 
 // --- Domain Models ---
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+// MODIFICATION: Remove Serialize/Deserialize from derive, as we implement it manually.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct NodeId(pub [u8; 32]);
+
+// FIX: Manual implementation for JSON-friendly (hex string) serialization.
+impl Serialize for NodeId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(self.0))
+    }
+}
+
+// FIX: Manual implementation for deserialization from a hex string.
+impl<'de> Deserialize<'de> for NodeId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes_vec = hex::decode(s).map_err(D::Error::custom)?;
+        let bytes: [u8; 32] = bytes_vec
+            .try_into()
+            .map_err(|_| D::Error::custom("Invalid hex string length for NodeId"))?;
+        Ok(NodeId(bytes))
+    }
+}
 
 impl NodeId {
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -107,16 +136,18 @@ impl SignedMessage {
 }
 
 /// Information about a node, as held by the Engine.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)] // Add Deserialize and PartialEq for delta logic
 pub struct NodeInfo {
     pub telemetry: TelemetryData,
     pub community_id: u32,
 }
 
 /// A snapshot of the network state, for use by the visualizer.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)] // Add Deserialize
 pub struct NetworkState {
     pub self_id: Option<NodeId>,
     pub nodes: HashMap<NodeId, NodeInfo>,
-    pub edges: Vec<NodeId>,
+    // MODIFICATION: Rename `edges` to `active_connections` for clarity.
+    // This will represent true, active P2P connections, not just known peers.
+    pub active_connections: Vec<NodeId>,
 }

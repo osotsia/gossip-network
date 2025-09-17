@@ -1,3 +1,4 @@
+<!-- File: frontend/src/lib/NetworkGraph.svelte -->
 <script lang="ts">
   import * as d3 from 'd3';
   import type { GraphData, SimulationNode, SimulationLink } from '$lib/types';
@@ -17,7 +18,7 @@
     .force('center', d3.forceCenter());
 
   $effect(() => {
-    if (!svgEl) return;
+    if (!svgEl || !data || !data.nodes) return;
 
     const oldNodeMap = new Map<string, SimulationNode>(
       simulation.nodes().map((d) => [d.id, d])
@@ -51,13 +52,16 @@
   });
 
   $effect(() => {
-    if (!svgEl) return;
-    const g = d3.select(svgEl).select<SVGGElement>('g');
+    const element = svgEl;
+    if (!element) return;
+    const g = d3.select(element).select<SVGGElement>('g');
     const zoomBehavior = d3.zoom<SVGElement, unknown>().on('zoom', (event) => {
       g.attr('transform', event.transform.toString());
     });
-    d3.select(svgEl).call(zoomBehavior);
-    return () => d3.select(svgEl).on('.zoom', null);
+    d3.select(element).call(zoomBehavior);
+    return () => {
+      d3.select(element).on('.zoom', null);
+    };
   });
 </script>
 
@@ -65,14 +69,21 @@
   <g>
     <g class="links" stroke="#555" stroke-width="1.5" stroke-opacity="0.6">
       {#each (simulation.force('link') as d3.ForceLink<SimulationNode, SimulationLink>).links() as link}
-        {@const source = link.source as SimulationNode}
-        {@const target = link.target as SimulationNode}
-        <line
-          x1={source.x}
-          y1={source.y}
-          x2={target.x}
-          y2={target.y}
-        />
+        <!--
+          FIX: This is the critical guard. D3 may not have resolved the link's source/target
+          from a string ID to an object yet. We must check that they are objects before
+          trying to access their x/y properties.
+        -->
+        {#if typeof link.source === 'object' && typeof link.target === 'object'}
+          {@const source = link.source as SimulationNode}
+          {@const target = link.target as SimulationNode}
+          <line
+            x1={source.x}
+            y1={source.y}
+            x2={target.x}
+            y2={target.y}
+          />
+        {/if}
       {/each}
     </g>
     <g class="nodes" stroke="#fff" stroke-width="1.5">

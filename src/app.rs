@@ -9,7 +9,8 @@ use crate::{
     domain::{Identity, NetworkState},
     engine::Engine,
     error::Result,
-    transport::{InboundMessage, Transport, TransportCommand},
+    // MODIFICATION: Import new types.
+    transport::{ConnectionEvent, InboundMessage, Transport, TransportCommand},
 };
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -52,6 +53,8 @@ impl App {
         let (transport_command_tx, transport_command_rx) = mpsc::channel::<TransportCommand>(100);
         let (inbound_message_tx, inbound_message_rx) = mpsc::channel::<InboundMessage>(100);
         let (network_state_tx, network_state_rx) = watch::channel(NetworkState::default());
+        // NEW: Create the channel for connection events.
+        let (conn_event_tx, conn_event_rx) = mpsc::channel::<ConnectionEvent>(100);
 
         // --- Instantiate and Spawn Services ---
 
@@ -61,6 +64,8 @@ impl App {
             self.config.bootstrap_peers.clone(),
             transport_command_rx,
             inbound_message_tx,
+            // NEW: Pass the connection event sender to the Transport.
+            conn_event_tx,
         )?;
         let transport_task = tokio::spawn(transport.run(self.shutdown_token.clone()));
         tracing::debug!("Transport service spawned.");
@@ -70,6 +75,8 @@ impl App {
             identity,
             self.config.clone(),
             inbound_message_rx,
+            // NEW: Pass the connection event receiver to the Engine.
+            conn_event_rx,
             transport_command_tx,
             network_state_tx,
         );

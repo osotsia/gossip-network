@@ -6,10 +6,12 @@
 use crate::{
     config::Config,
     domain::{GossipPayload, Identity, NetworkState, NodeInfo, SignedMessage, TelemetryData},
-    transport::{InboundMessage, TransportCommand},
+    // MODIFICATION: Import ConnectionEvent
+    transport::{ConnectionEvent, InboundMessage, TransportCommand},
 };
 use std::{
-    collections::HashMap,
+    // MODIFICATION: Import HashSet
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -28,7 +30,11 @@ pub struct Engine {
     // The canonical state of the network from this node's perspective.
     node_info: HashMap<crate::domain::NodeId, NodeInfo>,
     known_peers: HashMap<crate::domain::NodeId, SocketAddr>,
+    // NEW: State for tracking active P2P connections reported by Transport.
+    active_peer_addrs: HashSet<SocketAddr>,
     inbound_rx: mpsc::Receiver<InboundMessage>,
+    // NEW: Receiver for connection events.
+    conn_event_rx: mpsc::Receiver<ConnectionEvent>,
     transport_tx: mpsc::Sender<TransportCommand>,
     state_tx: watch::Sender<NetworkState>,
 }
@@ -38,6 +44,8 @@ impl Engine {
         identity: Identity,
         config: Config,
         inbound_rx: mpsc::Receiver<InboundMessage>,
+        // NEW: Accept connection event receiver.
+        conn_event_rx: mpsc::Receiver<ConnectionEvent>,
         transport_tx: mpsc::Sender<TransportCommand>,
         state_tx: watch::Sender<NetworkState>,
     ) -> Self {
@@ -48,7 +56,10 @@ impl Engine {
             config,
             node_info: HashMap::new(),
             known_peers: HashMap::new(),
+            // NEW: Initialize connection state.
+            active_peer_addrs: HashSet::new(),
             inbound_rx,
+            conn_event_rx,
             transport_tx,
             state_tx,
         }
@@ -73,10 +84,31 @@ impl Engine {
                 },
                 Some(inbound) = self.inbound_rx.recv() => {
                     self.handle_inbound_message(inbound).await;
+                },
+                // NEW: Handle connection events from the Transport layer.
+                Some(event) = self.conn_event_rx.recv() => {
+                    self.handle_connection_event(event);
                 }
                 else => {
                     tracing::info!("Channel closed. Engine service shutting down.");
                     break;
+                }
+            }
+        }
+    }
+
+    fn handle_connection_event(&mut self, event: ConnectionEvent) {
+        match event {
+            ConnectionEvent::PeerConnected { peer_addr } => {
+                if self.active_peer_addrs.insert(peer_addr) {
+                    tracing::debug!(peer_addr = %peer_addr, "Peer connection established");
+                    self.publish_state();
+                }
+            }
+            ConnectionEvent::PeerDisconnected { peer_addr } => {
+                if self.active_peer_addrs.remove(&peer_addr) {
+                    tracing::debug!(peer_addr = %peer_addr, "Peer connection lost");
+                    self.publish_state();
                 }
             }
         }
@@ -88,10 +120,15 @@ impl Engine {
             return;
         }
 
-        self.known_peers.insert(inbound.message.originator, inbound.peer_addr);
+        // Update the known peer's address.
+        self.known_peers
+            .insert(inbound.message.originator, inbound.peer_addr);
 
         let is_new = match self.node_info.get(&inbound.message.originator) {
-            Some(existing) => inbound.message.message.telemetry.timestamp_ms > existing.telemetry.timestamp_ms,
+            Some(existing) => {
+                inbound.message.message.telemetry.timestamp_ms
+                    > existing.telemetry.timestamp_ms
+            }
             None => true,
         };
 
@@ -101,7 +138,8 @@ impl Engine {
                 telemetry: inbound.message.message.telemetry.clone(),
                 community_id: inbound.message.message.community_id,
             };
-            self.node_info.insert(inbound.message.originator, node_info);
+            self.node_info
+                .insert(inbound.message.originator, node_info);
 
             self.publish_state();
             self.gossip_to_peers(inbound.message).await;
@@ -123,40 +161,35 @@ impl Engine {
         };
 
         let signed_message = self.identity.sign(payload);
-        tracing::info!("Generated new telemetry. Gossiping to peers...");
+        tracing::debug!("Generated new telemetry. Gossiping to peers...");
 
         let node_info = NodeInfo {
             telemetry: signed_message.message.telemetry.clone(),
             community_id: signed_message.message.community_id,
         };
-        self.node_info.insert(self.identity.node_id, node_info);
+        self.node_info
+            .insert(self.identity.node_id, node_info);
 
         self.publish_state();
 
-        // --- START MODIFICATION ---
-
-        // 1. Gossip to already known peers (the existing logic).
         self.gossip_to_peers(signed_message.clone()).await;
 
-        // 2. Proactively gossip to configured bootstrap peers to break the initial deadlock.
-        // This ensures that we initiate communication even if we haven't received
-        // any messages from them yet.
         for &addr in &self.config.bootstrap_peers {
-            tracing::debug!(peer_addr = %addr, "Proactively gossiping to bootstrap peer");
             let command = TransportCommand::SendMessage(addr, signed_message.clone());
             if let Err(e) = self.transport_tx.send(command).await {
                 tracing::error!(error = %e, "Failed to send command to transport service for bootstrap peer");
             }
         }
-        // --- END MODIFICATION ---
     }
 
     async fn gossip_to_peers(&self, message: SignedMessage) {
-        let peers_to_gossip_to =
-            protocol::select_peers(&self.known_peers, message.originator, self.config.gossip_factor);
+        let peers_to_gossip_to = protocol::select_peers(
+            &self.known_peers,
+            message.originator,
+            self.config.gossip_factor,
+        );
 
         if peers_to_gossip_to.is_empty() {
-            // This is now an expected condition at startup before bootstrap peers are known.
             tracing::debug!("No known peers to gossip to yet.");
             return;
         }
@@ -190,6 +223,7 @@ impl Engine {
             tracing::info!(count = stale_nodes.len(), "Pruning stale nodes");
             for node_id in stale_nodes {
                 self.node_info.remove(&node_id);
+                // FIX: Remove the stale node from known_peers to prevent memory leak.
                 self.known_peers.remove(&node_id);
             }
             self.publish_state();
@@ -197,19 +231,26 @@ impl Engine {
     }
 
     fn publish_state(&self) {
-        let current_edges: Vec<_> = self.known_peers.keys().cloned().collect();
-        
+        // MODIFICATION: Build the list of active connections by mapping active
+        // SocketAddrs back to NodeIds.
+        let active_connections = self
+            .known_peers
+            .iter()
+            .filter(|(_, &addr)| self.active_peer_addrs.contains(&addr))
+            .map(|(id, _)| *id)
+            .collect();
+
         let state = NetworkState {
             self_id: Some(self.identity.node_id),
             nodes: self.node_info.clone(),
-            edges: current_edges,
+            active_connections,
         };
-        
-        // Add a debug log to print the JSON that will be sent to the frontend.
+
         if let Ok(json_state) = serde_json::to_string(&state) {
             tracing::debug!(payload = %json_state, "Publishing state update to API");
         }
-        
+
+        // This send will only fail if there are no receivers, which is fine.
         let _ = self.state_tx.send(state);
     }
 }

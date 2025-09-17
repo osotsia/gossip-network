@@ -8,11 +8,11 @@ use crate::{
     error::Result,
     transport::{connection::handle_connection, tls::configure_tls},
 };
-// --- MODIFICATION: Add TokioRuntime to the import list ---
 use quinn::{Connection, Endpoint, TokioRuntime};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use tokio::sync::{mpsc, Mutex};
+// MODIFICATION: Add Semaphore for concurrency limiting.
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 pub mod connection;
@@ -20,6 +20,8 @@ pub mod tls;
 
 /// The maximum allowed size for a single incoming message on a QUIC stream.
 const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1 MiB
+// MODIFICATION: Define a limit for concurrent inbound streams.
+const MAX_CONCURRENT_STREAMS: usize = 256;
 
 /// Commands that can be sent to the `Transport` service.
 #[derive(Debug)]
@@ -34,13 +36,24 @@ pub struct InboundMessage {
     pub message: SignedMessage,
 }
 
+// NEW: Events sent from Transport to Engine to report connection status.
+#[derive(Debug)]
+pub enum ConnectionEvent {
+    PeerConnected { peer_addr: SocketAddr },
+    PeerDisconnected { peer_addr: SocketAddr },
+}
+
 /// The P2P network transport actor.
 pub struct Transport {
     endpoint: Endpoint,
     command_rx: mpsc::Receiver<TransportCommand>,
     inbound_tx: mpsc::Sender<InboundMessage>,
+    // NEW: Channel for sending connection events to the Engine.
+    conn_event_tx: mpsc::Sender<ConnectionEvent>,
     bootstrap_peers: Vec<SocketAddr>,
     connections: Arc<Mutex<HashMap<SocketAddr, Connection>>>,
+    // NEW: Semaphore to limit concurrent stream handling.
+    stream_semaphore: Arc<Semaphore>,
 }
 
 impl Transport {
@@ -49,10 +62,11 @@ impl Transport {
         bootstrap_peers: Vec<SocketAddr>,
         command_rx: mpsc::Receiver<TransportCommand>,
         inbound_tx: mpsc::Sender<InboundMessage>,
+        // NEW: Add the connection event channel to the constructor.
+        conn_event_tx: mpsc::Sender<ConnectionEvent>,
     ) -> Result<Self> {
         let (server_config, client_config) = configure_tls()?;
 
-        // Manually create the underlying UDP socket to set SO_REUSEADDR.
         let socket = Socket::new(
             Domain::for_address(bind_addr),
             Type::DGRAM,
@@ -63,14 +77,11 @@ impl Transport {
         let std_socket: std::net::UdpSocket = socket.into();
         std_socket.set_nonblocking(true)?;
 
-        // --- MODIFICATION: Provide the correct quinn::TokioRuntime ---
-        // Create the Quinn endpoint using the pre-configured socket and the
-        // Tokio-specific runtime provided by the `quinn` crate.
         let mut endpoint = Endpoint::new(
             Default::default(),
             Some(server_config),
             std_socket,
-            Arc::new(TokioRuntime), // This is the fix.
+            Arc::new(TokioRuntime),
         )?;
         endpoint.set_default_client_config(client_config);
 
@@ -78,8 +89,11 @@ impl Transport {
             endpoint,
             command_rx,
             inbound_tx,
+            conn_event_tx,
             bootstrap_peers,
             connections: Arc::new(Mutex::new(HashMap::new())),
+            // NEW: Initialize the semaphore.
+            stream_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS)),
         })
     }
 
@@ -92,9 +106,11 @@ impl Transport {
         for &peer_addr in &self.bootstrap_peers {
             let endpoint = self.endpoint.clone();
             let connections = self.connections.clone();
+            // NEW: Clone the event sender for the bootstrap task.
+            let conn_event_tx = self.conn_event_tx.clone();
             tokio::spawn(async move {
                 tracing::info!(peer = %peer_addr, "Attempting to connect to bootstrap peer");
-                if let Err(e) = connection::connect_to_peer(endpoint, connections, peer_addr).await {
+                if let Err(e) = connection::connect_to_peer(endpoint, connections, peer_addr, conn_event_tx).await {
                     tracing::error!(peer = %peer_addr, error = %e, "Failed to connect to bootstrap peer");
                 }
             });
@@ -109,8 +125,11 @@ impl Transport {
                 Some(conn) = self.endpoint.accept() => {
                     let connections = self.connections.clone();
                     let inbound_tx = self.inbound_tx.clone();
+                    // NEW: Clone the event sender and semaphore for the connection handler task.
+                    let conn_event_tx = self.conn_event_tx.clone();
+                    let stream_semaphore = self.stream_semaphore.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(conn, connections, inbound_tx).await {
+                        if let Err(e) = handle_connection(conn, connections, inbound_tx, conn_event_tx, stream_semaphore).await {
                             tracing::error!(error = %e, "Connection handling failed");
                         }
                     });
@@ -132,8 +151,10 @@ impl Transport {
             TransportCommand::SendMessage(addr, msg) => {
                 let endpoint = self.endpoint.clone();
                 let connections = self.connections.clone();
+                // NEW: Clone the event sender for message sending tasks.
+                let conn_event_tx = self.conn_event_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = connection::send_message_to_peer(endpoint, connections, addr, msg).await {
+                    if let Err(e) = connection::send_message_to_peer(endpoint, connections, addr, msg, conn_event_tx).await {
                         tracing::warn!(peer = %addr, error = %e, "Failed to send message");
                     }
                 });

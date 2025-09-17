@@ -2,7 +2,13 @@
 //!
 //! Handles WebSocket connection logic for the visualizer API.
 
-use crate::api::ApiState;
+use crate::{
+    api::{
+        protocol::{SnapshotPayload, UpdatePayload, WebSocketMessage},
+        ApiState,
+    },
+    domain::NetworkState,
+};
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -10,6 +16,8 @@ use axum::{
     },
     response::IntoResponse,
 };
+use futures::stream::StreamExt;
+use std::collections::HashSet;
 
 /// The handler for WebSocket upgrade requests.
 pub async fn websocket_handler(
@@ -19,46 +27,129 @@ pub async fn websocket_handler(
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
+/// Calculates the difference between two network states and produces a list of updates.
+fn calculate_delta(old: &NetworkState, new: &NetworkState) -> Vec<UpdatePayload> {
+    let mut updates = Vec::new();
+
+    // 1. Check for added or updated nodes
+    for (id, new_info) in &new.nodes {
+        match old.nodes.get(id) {
+            Some(old_info) => {
+                if old_info != new_info {
+                    updates.push(UpdatePayload::NodeUpdated {
+                        id: *id,
+                        info: new_info.clone(),
+                    });
+                }
+            }
+            None => {
+                updates.push(UpdatePayload::NodeAdded {
+                    id: *id,
+                    info: new_info.clone(),
+                });
+            }
+        }
+    }
+
+    // 2. Check for removed nodes
+    for id in old.nodes.keys() {
+        if !new.nodes.contains_key(id) {
+            updates.push(UpdatePayload::NodeRemoved { id: *id });
+        }
+    }
+
+    // 3. Check for connection status changes
+    let old_conns: HashSet<_> = old.active_connections.iter().collect();
+    let new_conns: HashSet<_> = new.active_connections.iter().collect();
+
+    for &peer_id in old_conns.difference(&new_conns) {
+        updates.push(UpdatePayload::ConnectionStatus {
+            peer_id: *peer_id,
+            is_connected: false,
+        });
+    }
+    for &peer_id in new_conns.difference(&old_conns) {
+        updates.push(UpdatePayload::ConnectionStatus {
+            peer_id: *peer_id,
+            is_connected: true,
+        });
+    }
+
+    updates
+}
+
 /// Manages a single WebSocket connection, sending an initial state snapshot
-/// and broadcasting subsequent updates.
+/// and broadcasting subsequent delta updates.
 async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     tracing::info!("New WebSocket client connected.");
     let mut state_rx = state.state_rx.clone();
 
-    // Send initial state snapshot.
-    let initial_state = state_rx.borrow().clone();
-    let initial_json =
-        serde_json::to_string(&initial_state).expect("Failed to serialize initial state");
+    // --- Wait for the first valid state before sending a snapshot ---
+    let mut last_sent_state;
+    loop {
+        let current_state = state_rx.borrow().clone();
+        if current_state.self_id.is_some() {
+            let snapshot_msg = WebSocketMessage::Snapshot(SnapshotPayload::from(&current_state));
+            let initial_json =
+                serde_json::to_string(&snapshot_msg).expect("Failed to serialize initial state");
 
-    if socket.send(Message::Text(initial_json)).await.is_err() {
-        tracing::warn!("Failed to send initial state to WebSocket client. Closing.");
-        return;
+            if socket.send(Message::Text(initial_json)).await.is_err() {
+                tracing::warn!("Failed to send initial state to WebSocket client. Closing.");
+                return;
+            }
+            last_sent_state = current_state;
+            break;
+        }
+        // State is not ready, wait for the next change.
+        if state_rx.changed().await.is_err() {
+            tracing::info!("State channel closed before initial state was ready. Disconnecting client.");
+            return;
+        }
     }
 
-    // Watch for changes and broadcast updates.
+    // --- Watch for changes and broadcast delta updates ---
     loop {
         tokio::select! {
-            Ok(_) = state_rx.changed() => {
-                let new_state = state_rx.borrow().clone();
-                let new_json = match serde_json::to_string(&new_state) {
-                    Ok(json) => json,
-                    Err(e) => {
-                        tracing::error!(error = %e, "Failed to serialize new state");
-                        continue;
-                    }
-                };
-
-                if socket.send(Message::Text(new_json)).await.is_err() {
-                    tracing::info!("WebSocket client disconnected.");
+            result = state_rx.changed() => {
+                if result.is_err() {
+                    tracing::info!("State channel closed. Disconnecting client.");
                     break;
                 }
+
+                let new_state = state_rx.borrow().clone();
+                // Ensure self_id is still present, defensively.
+                if new_state.self_id.is_none() { continue; }
+
+                let updates = calculate_delta(&last_sent_state, &new_state);
+
+                if !updates.is_empty() {
+                    for update in updates {
+                        let update_msg = WebSocketMessage::Update(update);
+                        let json = match serde_json::to_string(&update_msg) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                tracing::error!(error = %e, "Failed to serialize update");
+                                continue;
+                            }
+                        };
+
+                        if socket.send(Message::Text(json)).await.is_err() {
+                            tracing::info!("WebSocket client disconnected during update.");
+                            break;
+                        }
+                    }
+                }
+                last_sent_state = new_state;
             }
-            Some(Ok(msg)) = socket.recv() => {
+
+            // Handle client-side messages (e.g., close)
+            Some(Ok(msg)) = socket.next() => {
                 if let Message::Close(_) = msg {
                     tracing::info!("WebSocket client sent close message.");
                     break;
                 }
             }
+
             else => {
                 tracing::info!("WebSocket connection closed or state channel dropped.");
                 break;

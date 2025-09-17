@@ -1,15 +1,18 @@
+// --- File: src/api/mod.rs ---
 //! src/api/mod.rs
 //!
 //! Defines the `ApiServer` service, which provides the web frontend and
 //! a WebSocket endpoint for real-time visualization.
 
-use crate::{api::ws::websocket_handler, domain::NetworkState};
+// FIX: Remove the incorrect use statement for websocket_handler.
+use crate::domain::NetworkState;
 use axum::{routing::get, Router};
 use std::net::SocketAddr;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tower_http::services::ServeDir;
 
+pub mod protocol;
 pub mod ws;
 
 /// The shared state accessible by all Axum handlers.
@@ -36,10 +39,9 @@ impl ApiServer {
             state_rx: self.state_rx,
         };
 
-        // **FIX:** The server runs from inside a node's directory, where the assets
-        // are copied to a `dist` folder. The path should not include `frontend`.
+        // FIX: Use the correct path to the handler: `ws::websocket_handler`.
         let app = Router::new()
-            .route("/ws", get(websocket_handler))
+            .route("/ws", get(ws::websocket_handler))
             .nest_service("/", ServeDir::new("dist"))
             .with_state(app_state);
 

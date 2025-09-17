@@ -19,6 +19,7 @@ socket2 = "0.5"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 anyhow = "1.0" # Used in bin for top-level error reporting
+futures = "0.3" 
 
 # Tracing (replaces log)
 tracing = "0.1"
