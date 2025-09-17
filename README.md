@@ -10,27 +10,67 @@ A peer-to-peer network built in Rust where nodes exchange signed telemetry data 
 *   **Service-Oriented Architecture:** The application is decomposed into independent, concurrent services (Engine, Transport, API) that communicate via message passing, promoting modularity and testability.
 *   **Live Network Visualization:** A Svelte frontend connects to a node's WebSocket to provide a real-time graph visualization of the network state and data flow.
 
+
 ## Quick Start
 
-This project uses an orchestration script to simulate a local cluster.
+This project uses a comprehensive orchestration script to build the application, generate a private Public Key Infrastructure (PKI), and simulate a local cluster with a configurable topology.
 
-1.  **Generate Certificates:**
-    Follow the instructions in `src/transport/tls.rs` to generate the required `certs/` directory and files.
+### Prerequisites
 
-2.  **Build & Run:**
-    The orchestrator builds the project and launches a cluster.
+Ensure the following command-line tools are installed and available in your `PATH`:
 
-    ```sh
-    # Make the script executable (first time only)
-    chmod +x orchestrator.sh
+*   **Rust Toolchain:** (e.g., `cargo`, `rustc`)
+*   **Node.js & npm:** For building the frontend
+*   **Go:** For installing `minica`
+*   **OpenSSL:** For certificate conversion
+*   **minica:** A simple CA management tool.
 
-    # Run a 30-node network with 3 communities.
-    # Each node connects to 80% of its own community and 5% of others.
-    ./orchestrator.sh 30 3 0.8 0.05
-    ```
+### 1. Build the Frontend
 
-3.  **View Visualizer:**
-    Navigate to `http://127.0.0.1:8080` in your browser.
+The orchestrator serves the pre-built static assets for the visualizer.
+
+```sh
+# Navigate to the frontend directory
+cd frontend
+
+# Install dependencies
+npm install
+
+# Build the static site
+npm run build
+
+# Return to the project root
+cd ..
+```
+
+### 2. Run the Orchestrator
+
+The script handles the entire cluster deployment process. It will:
+1.  Build the Rust binary in release mode.
+2.  Automatically generate a root CA and unique TLS certificates for each node if they don't exist.
+3.  Create a `cluster/` directory with unique configurations for each node.
+4.  Launch all node processes in the background.
+
+To run the script, provide the number of nodes, number of communities, and the connection ratios for intra-community and inter-community peers.
+
+```sh
+# Make the script executable (first time only)
+chmod +x orchestrator.sh
+
+# Example: Run a 15-node cluster with 3 communities.
+# Each node connects to 80% of its own community members and 10% of others.
+./orchestrator.sh 15 3 0.8 0.1
+```
+
+### 3. View the Visualizer
+
+Once the cluster is running, open your browser and navigate to the address of the designated visualizer node (`node-0`).
+
+*   URL: `http://127.0.0.1:8080`
+
+### 4. Stop the Cluster
+
+To shut down all node processes gracefully, press `Ctrl+C` in the terminal where `orchestrator.sh` is running.
 
 ## Architecture
 
