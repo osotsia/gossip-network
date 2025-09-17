@@ -24,8 +24,9 @@ This project uses an orchestration script to simulate a local cluster.
     # Make the script executable (first time only)
     chmod +x orchestrator.sh
 
-    # Run a 10-node cluster with a 30% connection ratio
-    ./orchestrator.sh 10 0.3
+    # Run a 30-node network with 3 communities.
+    # Each node connects to 80% of its own community and 5% of others.
+    ./orchestrator.sh 30 3 0.8 0.05
     ```
 
 3.  **View Visualizer:**
