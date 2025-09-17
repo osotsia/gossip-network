@@ -62,15 +62,9 @@ chmod +x orchestrator.sh
 ./orchestrator.sh 15 3 0.8 0.1
 ```
 
-### 3. View the Visualizer
-
 Once the cluster is running, open your browser and navigate to the address of the designated visualizer node (`node-0`).
 
 *   URL: `http://127.0.0.1:8080`
-
-### 4. Stop the Cluster
-
-To shut down all node processes gracefully, press `Ctrl+C` in the terminal where `orchestrator.sh` is running.
 
 ## Architecture
 
