@@ -10,6 +10,25 @@ A peer-to-peer network built in Rust where nodes exchange signed telemetry data 
 *   **Service-Oriented Architecture:** The application is decomposed into independent, concurrent services (Engine, Transport, API) that communicate via message passing, promoting modularity and testability.
 *   **Live Network Visualization:** A Svelte frontend connects to a node's WebSocket to provide a real-time graph visualization of the network state and data flow.
 
+For a detailed breakdown of the design, components, and data flow, see the documentation in docs/.
+
+## FAQ
+
+**Q1: Why use a gossip protocol instead of just broadcasting messages to all known peers?**
+
+A: Broadcasting creates network storms in dense networks (O(N²) message complexity) and is brittle; if a central node fails, the network can be partitioned. Gossip is more scalable and resilient. By sending messages to a small, random subset of peers, it reduces redundant traffic and ensures information can bypass failed nodes, propagating through the network like a rumor.
+
+**Q2: How does this system establish trust between nodes?**
+
+A: Trust is established at two layers. First, at the **transport layer**, QUIC connections are only permitted between nodes that present a TLS certificate signed by a shared, private Certificate Authority (CA). This prevents unauthorized machines from even joining the network. Second, at the **application layer**, every piece of telemetry data is individually signed by the originator's ED25519 private key. This proves data authenticity and integrity, ensuring that a compromised node cannot forge messages on behalf of other nodes.
+
+**Q3: The visualizer shows the state of the whole network. Does this mean one node has perfect, real-time information?**
+
+A: No, and this demonstrates a key principle of distributed systems. The visualizer shows the network state *from the perspective of a single designated node*. This view is subject to **eventual consistency**. Due to network latency, this node's state will always lag slightly behind the true state of the network. Watching the graph allows you to observe this propagation delay in real-time as new nodes appear and values update.
+
+**Q4: If an attacker compromises one node, can they see and attack the entire network?**
+
+A: No. An attacker cannot map the entire network topology. They only discover the IP addresses of the small, random subset of peers they are directly connected to. This partial visibility makes it difficult to launch targeted network-level attacks (e.g., DDoS) against specific, non-adjacent nodes. While the attacker will eventually learn the cryptographic *identities* of all nodes as state propagates, they cannot forge messages (prevented by ED25519 signatures) or decrypt traffic between other honest peers (prevented by QUIC's TLS 1.3 encryption).
 
 ## Quick Start
 
@@ -57,33 +76,12 @@ To run the script, provide the number of nodes, number of communities, and the c
 # Make the script executable (first time only)
 chmod +x orchestrator.sh
 
-# Example: Run a 15-node cluster with 3 communities.
+# Example: Run a 30-node cluster with 3 communities.
 # Each node connects to 80% of its own community members and 10% of others.
-./orchestrator.sh 15 3 0.8 0.1
+./orchestrator.sh 30 3 0.8 0.1
 ```
 
 Once the cluster is running, open your browser and navigate to the address of the designated visualizer node (`node-0`).
 
 *   URL: `http://127.0.0.1:8080`
 
-## Architecture
-
-The system is designed as a set of isolated, concurrent services communicating via asynchronous channels. For a detailed breakdown of the design, components, and data flow, see the documentation in docs/.
-
-## FAQ
-
-**Q1: Why use a gossip protocol instead of just broadcasting messages to all known peers?**
-
-A: Broadcasting creates network storms in dense networks (O(N²) message complexity) and is brittle; if a central node fails, the network can be partitioned. Gossip is more scalable and resilient. By sending messages to a small, random subset of peers, it reduces redundant traffic and ensures information can bypass failed nodes, propagating through the network like a rumor.
-
-**Q2: How does this system establish trust between nodes?**
-
-A: Trust is established at two layers. First, at the **transport layer**, QUIC connections are only permitted between nodes that present a TLS certificate signed by a shared, private Certificate Authority (CA). This prevents unauthorized machines from even joining the network. Second, at the **application layer**, every piece of telemetry data is individually signed by the originator's ED25519 private key. This proves data authenticity and integrity, ensuring that a compromised node cannot forge messages on behalf of other nodes.
-
-**Q3: The visualizer shows the state of the whole network. Does this mean one node has perfect, real-time information?**
-
-A: No, and this demonstrates a key principle of distributed systems. The visualizer shows the network state *from the perspective of a single designated node*. This view is subject to **eventual consistency**. Due to network latency, this node's state will always lag slightly behind the true state of the network. Watching the graph allows you to observe this propagation delay in real-time as new nodes appear and values update.
-
-**Q4: If an attacker compromises one node, can they see and attack the entire network?**
-
-A: No. An attacker cannot map the entire network topology. They only discover the IP addresses of the small, random subset of peers they are directly connected to. This partial visibility makes it difficult to launch targeted network-level attacks (e.g., DDoS) against specific, non-adjacent nodes. While the attacker will eventually learn the cryptographic *identities* of all nodes as state propagates, they cannot forge messages (prevented by ED25519 signatures) or decrypt traffic between other honest peers (prevented by QUIC's TLS 1.3 encryption).
