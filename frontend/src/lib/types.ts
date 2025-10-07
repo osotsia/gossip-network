@@ -24,7 +24,9 @@ export type UpdatePayload =
     | { event: 'node_added'; data: { id: NodeId; info: NodeInfo } }
     | { event: 'node_updated'; data: { id: NodeId; info: NodeInfo } }
     | { event: 'node_removed'; data: { id: NodeId } }
-    | { event: 'connection_status'; data: { peer_id: NodeId; is_connected: boolean } };
+    | { event: 'connection_status'; data: { peer_id: NodeId; is_connected: boolean } }
+    // NEW: Add the explicit animation event type.
+    | { event: 'animate_edge'; data: { from_peer: NodeId } };
 
 
 export type WebSocketMessage =

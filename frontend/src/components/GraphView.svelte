@@ -1,4 +1,3 @@
-<!-- --- File: frontend/src/components/GraphView.svelte --- -->
 <script lang="ts">
 	import { networkStore } from '../lib/networkStore.svelte.ts';
 	import * as d3 from 'd3';
@@ -24,16 +23,16 @@
 		simulation: d3.Simulation<SimulationNode, SimulationLink>;
 		linkGroup: d3.Selection<SVGGElement, unknown, null, undefined>;
 		nodeGroup: d3.Selection<SVGGElement, unknown, null, undefined>;
-        // MODIFICATION: Keep a stable reference to the merged link selection.
         linkMerged: d3.Selection<d3.BaseType | SVGLineElement, SimulationLink, SVGGElement, unknown>;
 	} | null = null;
     
     let graphNodes: SimulationNode[] = [];
 
-	const MIN_RADIUS = 8;
-	const MAX_RADIUS = 24;
+	// FIX: Replace dynamic radius constants with a single fixed value for clarity.
+	const NODE_RADIUS = 12;
 
-	// The `$effect` rune handles component initialization and reactive updates.
+	// FIX: Combine the graph update and animation logic into a single effect.
+	// This guarantees that link elements exist before animation is attempted, resolving the race condition.
 	$effect(() => {
 		if (!svgElement) return; // Wait for the SVG element to be bound.
 
@@ -54,7 +53,6 @@
 			const linkGroup = svg.append('g').attr('class', 'links');
 			const nodeGroup = svg.append('g').attr('class', 'nodes');
 
-            // Initialize linkMerged to an empty selection.
             const linkMerged = linkGroup.selectAll('line').data<SimulationLink>([]);
 
 			d3State = { simulation, linkGroup, nodeGroup, linkMerged };
@@ -62,10 +60,9 @@
 
 		const { simulation, linkGroup, nodeGroup } = d3State;
 
-		// --- Reactive Data Merge ---
+		// --- Reactive Data Merge (updates graph structure) ---
         const storeNodes = networkStore.nodes;
         const nodeMap = new Map(graphNodes.map(n => [n.id, n]));
-
         graphNodes = graphNodes.filter(n => storeNodes[n.id]);
 
         for (const id in storeNodes) {
@@ -96,7 +93,7 @@
 
 		linkSelection.exit().remove();
 		const linkEnter = linkSelection.enter().append('line');
-		d3State.linkMerged = linkEnter.merge(linkSelection); // Update the stored selection
+		d3State.linkMerged = linkEnter.merge(linkSelection); 
 
 		const nodeSelection = nodeGroup
 			.selectAll('g.node')
@@ -106,7 +103,8 @@
 		const nodeEnter = nodeSelection.enter().append('g').attr('class', 'node');
 
 		const colorScale = d3.scaleOrdinal(d3.schemeCategory10);
-		const radiusScale = d3.scaleLinear().domain([100, 150]).range([MIN_RADIUS, MAX_RADIUS]).clamp(true);
+		// FIX: The radius scale is no longer needed.
+		// const radiusScale = d3.scaleLinear().domain([100, 150]).range([MIN_RADIUS, MAX_RADIUS]).clamp(true);
 
 		nodeEnter.append('circle');
 		nodeEnter.append('text');
@@ -116,8 +114,8 @@
 		const nodeMerged = nodeEnter.merge(nodeSelection as any);
 
 		nodeMerged.select('circle')
-            .transition().duration(200)
-			.attr('r', d => radiusScale(d.info.telemetry.value))
+            // FIX: Use the fixed NODE_RADIUS. The transition is removed as it's now static.
+			.attr('r', NODE_RADIUS)
 			.attr('fill', d => colorScale(d.info.community_id.toString()))
 			.attr('stroke', d => (d.id === selfId ? '#facc15' : '#777'));
 
@@ -125,12 +123,33 @@
 			.text(d => networkStore.truncateNodeId(d.id));
 
 		nodeMerged.select('title')
-			.text(d => `ID: ${d.id}\nCommunity: ${d.info.community_id}\nValue: ${d.info.telemetry.value.toFixed(2)}`);
+			// FIX: Remove the telemetry value from the tooltip for consistency.
+			.text(d => `ID: ${d.id}\nCommunity: ${d.info.community_id}`);
 
 		simulation.nodes(graphNodes);
 		simulation.force<d3.ForceLink<SimulationNode, SimulationLink>>('link')?.links(links);
 		simulation.alpha(0.3).restart();
 
+		// --- Animation Logic ---
+		const peersToAnimate = networkStore.currentPulsePeers;
+		if (peersToAnimate.size > 0) {
+			const linksToAnimate = d3State.linkMerged.filter(d => {
+				const sourceNodeId = (d.source as SimulationNode).id;
+				const targetNodeId = (d.target as SimulationNode).id;
+				
+				return (sourceNodeId === selfId && peersToAnimate.has(targetNodeId)) ||
+					   (targetNodeId === selfId && peersToAnimate.has(sourceNodeId));
+			});
+
+			if (!linksToAnimate.empty()) {
+				linksToAnimate.classed('highlight-pulse', false);
+				requestAnimationFrame(() => {
+					linksToAnimate.classed('highlight-pulse', true);
+				});
+			}
+		}
+
+		// --- Ticked Function ---
 		function ticked() {
 			d3State?.linkMerged
 				.attr('x1', (d: any) => d.source.x)
@@ -141,24 +160,6 @@
 			nodeMerged.attr('transform', (d) => `translate(${d.x},${d.y})`);
 		}
 	});
-
-    // NEW: Add a separate effect specifically for handling the highlight.
-    // This effect is lean and runs only when the highlight state changes.
-    $effect(() => {
-        if (!d3State) return;
-
-        const highlightedNodeId = networkStore.lastMessageSource;
-        const selfId = networkStore.selfId;
-
-        // Use D3's `classed` method to efficiently toggle the highlight class.
-        d3State.linkMerged.classed('highlighted', d =>
-            highlightedNodeId !== null &&
-            selfId !== null &&
-            // Check if the highlighted node is either the source or target of the link
-            ((d.source as SimulationNode).id === selfId && (d.target as SimulationNode).id === highlightedNodeId) ||
-            ((d.target as SimulationNode).id === selfId && (d.source as SimulationNode).id === highlightedNodeId)
-        );
-    });
 
 	// --- D3 Drag Handler ---
 	function drag(simulation: d3.Simulation<SimulationNode, any>) {
@@ -193,26 +194,75 @@
 </div>
 
 <style>
-	.graph-container { display: flex; flex-direction: column; height: 100%; padding: 1.5rem; gap: 1rem; box-sizing: border-box; }
-	.stats-bar { color: #ccc; display: flex; gap: 2rem; background: #2a2a2e; padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid #444; font-family: monospace; flex-shrink: 0; }
-	.svg-wrapper { flex-grow: 1; border: 1px solid #444; border-radius: 8px; overflow: hidden; background-color: #1e1e1e; }
+	.graph-container {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		padding: 1.5rem;
+		gap: 1rem;
+		box-sizing: border-box;
+	}
+	.stats-bar {
+		color: #ccc;
+		display: flex;
+		gap: 2rem;
+		background: #2a2a2e;
+		padding: 0.5rem 1rem;
+		border-radius: 6px;
+		border: 1px solid #444;
+		font-family: monospace;
+		flex-shrink: 0;
+	}
+	.svg-wrapper {
+		flex-grow: 1;
+		border: 1px solid #444;
+		border-radius: 8px;
+		overflow: hidden;
+		background-color: #1e1e1e;
+	}
 
-	/* Default link style */
 	:global(svg .links line) {
 		stroke: #555;
 		stroke-opacity: 0.7;
 		stroke-width: 1.5px;
-        /* NEW: Add transition for smooth style changes */
-        transition: stroke 0.2s ease-out, stroke-width 0.2s ease-out;
 	}
-    
-    /* NEW: Style for the highlighted link */
-    :global(svg .links line.highlighted) {
-        stroke: #facc15; /* A bright yellow */
-        stroke-width: 4px;
+
+    @keyframes pulse-animation {
+        0% {
+            stroke: #fde047; /* Bright yellow */
+            stroke-width: 4px;
+        }
+        100% {
+            stroke: #555;
+            stroke-width: 1.5px;
+        }
     }
 
-	:global(svg .nodes circle) { stroke-width: 2px; transition: transform 0.1s ease-in-out; }
-	:global(svg .nodes g.node:hover circle) { transform: scale(1.1); }
-	:global(svg .nodes text) { fill: #ccc; font-size: 10px; font-family: monospace; paint-order: stroke; stroke: #1e1e1e; stroke-width: 2px; stroke-linejoin: round; pointer-events: none; transform: translate(0, -16px); text-anchor: middle; }
+    :global(svg .links line.highlight-pulse) {
+        animation-name: pulse-animation;
+        animation-duration: 750ms;
+        animation-timing-function: ease-out;
+        animation-fill-mode: forwards;
+    }
+
+	:global(svg .nodes circle) {
+		stroke-width: 2px;
+		transition: transform 0.1s ease-in-out;
+	}
+	:global(svg .nodes g.node:hover circle) {
+		transform: scale(1.1);
+	}
+
+	:global(svg .nodes text) {
+		fill: #ccc;
+		font-size: 10px;
+		font-family: monospace;
+		paint-order: stroke;
+		stroke: #1e1e1e;
+		stroke-width: 2px;
+		stroke-linejoin: round;
+		pointer-events: none;
+		transform: translate(0, -16px);
+		text-anchor: middle;
+	}
 </style>

@@ -54,4 +54,7 @@ pub enum UpdatePayload {
         peer_id: NodeId,
         is_connected: bool,
     },
+    // NEW: Add a dedicated event for triggering edge animations.
+    #[serde(rename = "animate_edge")]
+    AnimateEdge { from_peer: NodeId },
 }

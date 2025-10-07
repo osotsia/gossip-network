@@ -6,13 +6,13 @@
 use crate::{
     api::ApiServer,
     config::Config,
-    domain::{Identity, NetworkState},
+    domain::{Identity, NetworkState, NodeId}, // MODIFICATION: Import NodeId
     engine::Engine,
     error::Result,
     // MODIFICATION: Import new types.
     transport::{ConnectionEvent, InboundMessage, Transport, TransportCommand},
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch}; // MODIFICATION: Import broadcast
 use tokio_util::sync::CancellationToken;
 
 /// Encapsulates the entire application, including its configuration and the
@@ -53,8 +53,9 @@ impl App {
         let (transport_command_tx, transport_command_rx) = mpsc::channel::<TransportCommand>(100);
         let (inbound_message_tx, inbound_message_rx) = mpsc::channel::<InboundMessage>(100);
         let (network_state_tx, network_state_rx) = watch::channel(NetworkState::default());
-        // NEW: Create the channel for connection events.
         let (conn_event_tx, conn_event_rx) = mpsc::channel::<ConnectionEvent>(100);
+        // MODIFICATION: Keep the sender, but discard the initial receiver as it's not needed here.
+        let (animation_event_tx, _) = broadcast::channel::<NodeId>(32);
 
         // --- Instantiate and Spawn Services ---
 
@@ -64,7 +65,6 @@ impl App {
             self.config.bootstrap_peers.clone(),
             transport_command_rx,
             inbound_message_tx,
-            // NEW: Pass the connection event sender to the Transport.
             conn_event_tx,
         )?;
         let transport_task = tokio::spawn(transport.run(self.shutdown_token.clone()));
@@ -75,10 +75,11 @@ impl App {
             identity,
             self.config.clone(),
             inbound_message_rx,
-            // NEW: Pass the connection event receiver to the Engine.
             conn_event_rx,
             transport_command_tx,
             network_state_tx,
+            // MODIFICATION: Pass a clone of the sender to the Engine.
+            animation_event_tx.clone(),
         );
         let engine_task = tokio::spawn(engine.run(self.shutdown_token.clone()));
         tracing::debug!("Engine service spawned.");
@@ -86,7 +87,9 @@ impl App {
         // API Server (optional).
         let api_task = if let Some(viz_config) = self.config.visualizer {
             tracing::info!("Visualizer is enabled. Starting API server.");
-            let api_server = ApiServer::new(viz_config.bind_addr, network_state_rx);
+            // MODIFICATION: Pass the animation event sender to the ApiServer.
+            let api_server =
+                ApiServer::new(viz_config.bind_addr, network_state_rx, animation_event_tx);
             let api_server_task = tokio::spawn(api_server.run(self.shutdown_token.clone()));
             Some(api_server_task)
         } else {

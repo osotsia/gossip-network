@@ -18,6 +18,7 @@ use axum::{
 };
 use futures::stream::StreamExt;
 use std::collections::HashSet;
+use tokio::sync::broadcast::error::RecvError;
 
 /// The handler for WebSocket upgrade requests.
 pub async fn websocket_handler(
@@ -30,17 +31,13 @@ pub async fn websocket_handler(
 /// Calculates the difference between two network states and produces a list of updates.
 fn calculate_delta(old: &NetworkState, new: &NetworkState) -> Vec<UpdatePayload> {
     let mut updates = Vec::new();
-
-    // 1. Check for added or updated nodes
     for (id, new_info) in &new.nodes {
         match old.nodes.get(id) {
-            Some(old_info) => {
-                if old_info != new_info {
-                    updates.push(UpdatePayload::NodeUpdated {
-                        id: *id,
-                        info: new_info.clone(),
-                    });
-                }
+            Some(old_info) if old_info != new_info => {
+                updates.push(UpdatePayload::NodeUpdated {
+                    id: *id,
+                    info: new_info.clone(),
+                });
             }
             None => {
                 updates.push(UpdatePayload::NodeAdded {
@@ -48,20 +45,16 @@ fn calculate_delta(old: &NetworkState, new: &NetworkState) -> Vec<UpdatePayload>
                     info: new_info.clone(),
                 });
             }
+            _ => {}
         }
     }
-
-    // 2. Check for removed nodes
     for id in old.nodes.keys() {
         if !new.nodes.contains_key(id) {
             updates.push(UpdatePayload::NodeRemoved { id: *id });
         }
     }
-
-    // 3. Check for connection status changes
     let old_conns: HashSet<_> = old.active_connections.iter().collect();
     let new_conns: HashSet<_> = new.active_connections.iter().collect();
-
     for &peer_id in old_conns.difference(&new_conns) {
         updates.push(UpdatePayload::ConnectionStatus {
             peer_id: *peer_id,
@@ -74,7 +67,6 @@ fn calculate_delta(old: &NetworkState, new: &NetworkState) -> Vec<UpdatePayload>
             is_connected: true,
         });
     }
-
     updates
 }
 
@@ -83,6 +75,8 @@ fn calculate_delta(old: &NetworkState, new: &NetworkState) -> Vec<UpdatePayload>
 async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     tracing::info!("New WebSocket client connected.");
     let mut state_rx = state.state_rx.clone();
+    // FIX: Subscribe to the sender to get a new Receiver for this client.
+    let mut anim_rx = state.animation_tx.subscribe();
 
     // --- Wait for the first valid state before sending a snapshot ---
     let mut last_sent_state;
@@ -100,7 +94,6 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
             last_sent_state = current_state;
             break;
         }
-        // State is not ready, wait for the next change.
         if state_rx.changed().await.is_err() {
             tracing::info!("State channel closed before initial state was ready. Disconnecting client.");
             return;
@@ -110,16 +103,14 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     // --- Watch for changes and broadcast delta updates ---
     loop {
         tokio::select! {
+            // --- Branch 1: Handle state changes for nodes and connections ---
             result = state_rx.changed() => {
                 if result.is_err() {
                     tracing::info!("State channel closed. Disconnecting client.");
                     break;
                 }
-
                 let new_state = state_rx.borrow().clone();
-                // Ensure self_id is still present, defensively.
                 if new_state.self_id.is_none() { continue; }
-
                 let updates = calculate_delta(&last_sent_state, &new_state);
 
                 if !updates.is_empty() {
@@ -132,26 +123,47 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                                 continue;
                             }
                         };
-
                         if socket.send(Message::Text(json)).await.is_err() {
-                            tracing::info!("WebSocket client disconnected during update.");
-                            break;
+                            tracing::info!("WebSocket client disconnected during state update.");
+                            return;
                         }
                     }
                 }
                 last_sent_state = new_state;
-            }
+            },
 
-            // Handle client-side messages (e.g., close)
+            // --- Branch 2: Handle animation trigger events ---
+            result = anim_rx.recv() => {
+                match result {
+                    Ok(peer_id) => {
+                        let update_payload = UpdatePayload::AnimateEdge { from_peer: peer_id };
+                        let update_msg = WebSocketMessage::Update(update_payload);
+                        let json = serde_json::to_string(&update_msg).expect("Failed to serialize animation event");
+                        if socket.send(Message::Text(json)).await.is_err() {
+                            tracing::info!("WebSocket client disconnected during animation update.");
+                            return;
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => {
+                        tracing::warn!("Animation event channel lagged. Client may miss some animations.");
+                    }
+                    Err(RecvError::Closed) => {
+                        tracing::info!("Animation event channel closed. Disconnecting client.");
+                        break;
+                    }
+                }
+            },
+
+            // --- Branch 3: Handle client-side messages (e.g., close) ---
             Some(Ok(msg)) = socket.next() => {
                 if let Message::Close(_) = msg {
                     tracing::info!("WebSocket client sent close message.");
                     break;
                 }
-            }
+            },
 
             else => {
-                tracing::info!("WebSocket connection closed or state channel dropped.");
+                tracing::info!("WebSocket connection closed or a channel dropped.");
                 break;
             }
         }

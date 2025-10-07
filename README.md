@@ -22,9 +22,13 @@ A: Broadcasting creates network storms in dense networks (O(N²) message complex
 
 A: Trust is established at two layers. First, at the **transport layer**, QUIC connections are only permitted between nodes that present a TLS certificate signed by a shared, private Certificate Authority (CA). This prevents unauthorized machines from even joining the network. Second, at the **application layer**, every piece of telemetry data is individually signed by the originator's ED25519 private key. This proves data authenticity and integrity, ensuring that a compromised node cannot forge messages on behalf of other nodes.
 
-**Q3: The visualizer shows the state of the whole network. Does this mean one node has perfect, real-time information?**
+**Q3: The visualizer shows many connected nodes. Is this a complete, real-time map of the entire network?**
 
-A: No, and this demonstrates a key principle of distributed systems. The visualizer shows the network state *from the perspective of a single designated node*. This view is subject to **eventual consistency**. Due to network latency, this node's state will always lag slightly behind the true state of the network. Watching the graph allows you to observe this propagation delay in real-time as new nodes appear and values update.
+A: No. This is a key concept in distributed systems: the visualizer shows the network state *only from the perspective of the single, designated visualizer node* (`node-0`). This view is subject to **eventual consistency**. Information about other nodes—their existence, status, and connections—propagates through the network via gossip. Due to network latency, the visualizer node's understanding of the network will always lag slightly behind the true, global state. 
+
+The pulsing edges are a direct visualization of this process. When an edge flashes yellow, it indicates that the visualizer node has just received a new piece of information from that specific peer.
+
+<img src="docs/flashviz.jpg" alt="drawing" width="400"/>
 
 **Q4: If an attacker compromises one node, can they see and attack the entire network?**
 

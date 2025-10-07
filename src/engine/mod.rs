@@ -5,7 +5,7 @@
 
 use crate::{
     config::Config,
-    domain::{GossipPayload, Identity, NetworkState, NodeInfo, SignedMessage, TelemetryData},
+    domain::{GossipPayload, Identity, NetworkState, NodeId, NodeInfo, SignedMessage, TelemetryData},
     // MODIFICATION: Import ConnectionEvent
     transport::{ConnectionEvent, InboundMessage, TransportCommand},
 };
@@ -15,7 +15,7 @@ use std::{
     net::SocketAddr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch}; // MODIFICATION: Import broadcast
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
@@ -37,6 +37,8 @@ pub struct Engine {
     conn_event_rx: mpsc::Receiver<ConnectionEvent>,
     transport_tx: mpsc::Sender<TransportCommand>,
     state_tx: watch::Sender<NetworkState>,
+    // NEW: Sender for animation events.
+    animation_tx: broadcast::Sender<NodeId>,
 }
 
 impl Engine {
@@ -44,10 +46,11 @@ impl Engine {
         identity: Identity,
         config: Config,
         inbound_rx: mpsc::Receiver<InboundMessage>,
-        // NEW: Accept connection event receiver.
         conn_event_rx: mpsc::Receiver<ConnectionEvent>,
         transport_tx: mpsc::Sender<TransportCommand>,
         state_tx: watch::Sender<NetworkState>,
+        // NEW: Accept animation event sender.
+        animation_tx: broadcast::Sender<NodeId>,
     ) -> Self {
         Self {
             gossip_interval: Duration::from_millis(config.gossip_interval_ms),
@@ -56,12 +59,12 @@ impl Engine {
             config,
             node_info: HashMap::new(),
             known_peers: HashMap::new(),
-            // NEW: Initialize connection state.
             active_peer_addrs: HashSet::new(),
             inbound_rx,
             conn_event_rx,
             transport_tx,
             state_tx,
+            animation_tx,
         }
     }
 
@@ -85,7 +88,6 @@ impl Engine {
                 Some(inbound) = self.inbound_rx.recv() => {
                     self.handle_inbound_message(inbound).await;
                 },
-                // NEW: Handle connection events from the Transport layer.
                 Some(event) = self.conn_event_rx.recv() => {
                     self.handle_connection_event(event);
                 }
@@ -120,7 +122,15 @@ impl Engine {
             return;
         }
 
-        // Update the known peer's address.
+        // Before checking for newness, find the NodeId of the immediate peer who sent this message.
+        // This requires a reverse lookup in our `known_peers` map.
+        let peer_node_id = self
+            .known_peers
+            .iter()
+            .find(|(_, &addr)| addr == inbound.peer_addr)
+            .map(|(id, _)| *id);
+
+        // Update the known peer's address. This is crucial for the reverse lookup above.
         self.known_peers
             .insert(inbound.message.originator, inbound.peer_addr);
 
@@ -140,6 +150,15 @@ impl Engine {
             };
             self.node_info
                 .insert(inbound.message.originator, node_info);
+            
+            // NEW: If we found the peer's NodeId, send an animation event.
+            if let Some(id) = peer_node_id {
+                if self.animation_tx.send(id).is_err() {
+                    tracing::trace!(peer_id = %id, "No active API listeners for animation event.");
+                } else {
+                    tracing::debug!(peer_id = %id, "Sent animation event for incoming gossip.");
+                }
+            }
 
             self.publish_state();
             self.gossip_to_peers(inbound.message).await;
@@ -223,7 +242,6 @@ impl Engine {
             tracing::info!(count = stale_nodes.len(), "Pruning stale nodes");
             for node_id in stale_nodes {
                 self.node_info.remove(&node_id);
-                // FIX: Remove the stale node from known_peers to prevent memory leak.
                 self.known_peers.remove(&node_id);
             }
             self.publish_state();
@@ -231,8 +249,6 @@ impl Engine {
     }
 
     fn publish_state(&self) {
-        // MODIFICATION: Build the list of active connections by mapping active
-        // SocketAddrs back to NodeIds.
         let active_connections = self
             .known_peers
             .iter()
@@ -249,8 +265,6 @@ impl Engine {
         if let Ok(json_state) = serde_json::to_string(&state) {
             tracing::debug!(payload = %json_state, "Publishing state update to API");
         }
-
-        // This send will only fail if there are no receivers, which is fine.
         let _ = self.state_tx.send(state);
     }
 }
