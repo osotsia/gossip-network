@@ -1,3 +1,4 @@
+<!-- --- File: frontend/src/components/GraphView.svelte --- -->
 <script lang="ts">
 	import { networkStore } from '../lib/networkStore.svelte.ts';
 	import * as d3 from 'd3';
@@ -23,10 +24,10 @@
 		simulation: d3.Simulation<SimulationNode, SimulationLink>;
 		linkGroup: d3.Selection<SVGGElement, unknown, null, undefined>;
 		nodeGroup: d3.Selection<SVGGElement, unknown, null, undefined>;
+        // MODIFICATION: Keep a stable reference to the merged link selection.
+        linkMerged: d3.Selection<d3.BaseType | SVGLineElement, SimulationLink, SVGGElement, unknown>;
 	} | null = null;
     
-    // FIX: Maintain a stable array of node objects for the simulation.
-    // This is the key to preventing the layout reset.
     let graphNodes: SimulationNode[] = [];
 
 	const MIN_RADIUS = 8;
@@ -53,28 +54,26 @@
 			const linkGroup = svg.append('g').attr('class', 'links');
 			const nodeGroup = svg.append('g').attr('class', 'nodes');
 
-			d3State = { simulation, linkGroup, nodeGroup };
+            // Initialize linkMerged to an empty selection.
+            const linkMerged = linkGroup.selectAll('line').data<SimulationLink>([]);
+
+			d3State = { simulation, linkGroup, nodeGroup, linkMerged };
 		}
 
 		const { simulation, linkGroup, nodeGroup } = d3State;
 
-		// --- FIX: Reactive Data Merge ---
-        // Instead of creating a new array, merge changes into the existing `graphNodes`.
+		// --- Reactive Data Merge ---
         const storeNodes = networkStore.nodes;
         const nodeMap = new Map(graphNodes.map(n => [n.id, n]));
 
-        // 1. Remove nodes that are no longer in the store.
         graphNodes = graphNodes.filter(n => storeNodes[n.id]);
 
-        // 2. Update existing nodes and add new ones.
         for (const id in storeNodes) {
             const info = storeNodes[id];
             const existingNode = nodeMap.get(id);
             if (existingNode) {
-                // Update existing node's info
                 existingNode.info = info;
             } else {
-                // Add new node
                 graphNodes.push({ id, info });
             }
         }
@@ -82,9 +81,8 @@
 		const selfId = networkStore.selfId;
 		let links: SimulationLink[] = [];
 		if (selfId) {
-			// Create links from the visualizer node to its active peers.
 			links = [...networkStore.activeConnections]
-                .filter(peerId => storeNodes[peerId]) // Ensure target node exists
+                .filter(peerId => storeNodes[peerId]) 
                 .map((peerId) => ({
 				    source: selfId,
 				    target: peerId,
@@ -98,7 +96,7 @@
 
 		linkSelection.exit().remove();
 		const linkEnter = linkSelection.enter().append('line');
-		const linkMerged = linkEnter.merge(linkSelection);
+		d3State.linkMerged = linkEnter.merge(linkSelection); // Update the stored selection
 
 		const nodeSelection = nodeGroup
 			.selectAll('g.node')
@@ -107,19 +105,18 @@
 		nodeSelection.exit().remove();
 		const nodeEnter = nodeSelection.enter().append('g').attr('class', 'node');
 
-		// Define visual properties using scales.
 		const colorScale = d3.scaleOrdinal(d3.schemeCategory10);
 		const radiusScale = d3.scaleLinear().domain([100, 150]).range([MIN_RADIUS, MAX_RADIUS]).clamp(true);
 
 		nodeEnter.append('circle');
 		nodeEnter.append('text');
-		nodeEnter.append('title'); // For hover tooltips
+		nodeEnter.append('title');
 		nodeEnter.call(drag(simulation));
 
 		const nodeMerged = nodeEnter.merge(nodeSelection as any);
 
 		nodeMerged.select('circle')
-            .transition().duration(200) // Smoothly transition radius changes
+            .transition().duration(200)
 			.attr('r', d => radiusScale(d.info.telemetry.value))
 			.attr('fill', d => colorScale(d.info.community_id.toString()))
 			.attr('stroke', d => (d.id === selfId ? '#facc15' : '#777'));
@@ -130,14 +127,12 @@
 		nodeMerged.select('title')
 			.text(d => `ID: ${d.id}\nCommunity: ${d.info.community_id}\nValue: ${d.info.telemetry.value.toFixed(2)}`);
 
-		// Update the simulation with the new data.
 		simulation.nodes(graphNodes);
 		simulation.force<d3.ForceLink<SimulationNode, SimulationLink>>('link')?.links(links);
-		simulation.alpha(0.3).restart(); // Reheat the simulation.
+		simulation.alpha(0.3).restart();
 
-		// The simulation's "tick" function updates element positions.
 		function ticked() {
-			linkMerged
+			d3State?.linkMerged
 				.attr('x1', (d: any) => d.source.x)
 				.attr('y1', (d: any) => d.source.y)
 				.attr('x2', (d: any) => d.target.x)
@@ -146,6 +141,24 @@
 			nodeMerged.attr('transform', (d) => `translate(${d.x},${d.y})`);
 		}
 	});
+
+    // NEW: Add a separate effect specifically for handling the highlight.
+    // This effect is lean and runs only when the highlight state changes.
+    $effect(() => {
+        if (!d3State) return;
+
+        const highlightedNodeId = networkStore.lastMessageSource;
+        const selfId = networkStore.selfId;
+
+        // Use D3's `classed` method to efficiently toggle the highlight class.
+        d3State.linkMerged.classed('highlighted', d =>
+            highlightedNodeId !== null &&
+            selfId !== null &&
+            // Check if the highlighted node is either the source or target of the link
+            ((d.source as SimulationNode).id === selfId && (d.target as SimulationNode).id === highlightedNodeId) ||
+            ((d.target as SimulationNode).id === selfId && (d.source as SimulationNode).id === highlightedNodeId)
+        );
+    });
 
 	// --- D3 Drag Handler ---
 	function drag(simulation: d3.Simulation<SimulationNode, any>) {
@@ -180,58 +193,26 @@
 </div>
 
 <style>
-	.graph-container {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		padding: 1.5rem;
-		gap: 1rem;
-		box-sizing: border-box;
-	}
-	.stats-bar {
-		color: #ccc;
-		display: flex;
-		gap: 2rem;
-		background: #2a2a2e;
-		padding: 0.5rem 1rem;
-		border-radius: 6px;
-		border: 1px solid #444;
-		font-family: monospace;
-		flex-shrink: 0;
-	}
-	.svg-wrapper {
-		flex-grow: 1;
-		border: 1px solid #444;
-		border-radius: 8px;
-		overflow: hidden;
-		background-color: #1e1e1e;
-	}
+	.graph-container { display: flex; flex-direction: column; height: 100%; padding: 1.5rem; gap: 1rem; box-sizing: border-box; }
+	.stats-bar { color: #ccc; display: flex; gap: 2rem; background: #2a2a2e; padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid #444; font-family: monospace; flex-shrink: 0; }
+	.svg-wrapper { flex-grow: 1; border: 1px solid #444; border-radius: 8px; overflow: hidden; background-color: #1e1e1e; }
 
-	/* Styles for D3-generated elements */
+	/* Default link style */
 	:global(svg .links line) {
 		stroke: #555;
 		stroke-opacity: 0.7;
 		stroke-width: 1.5px;
+        /* NEW: Add transition for smooth style changes */
+        transition: stroke 0.2s ease-out, stroke-width 0.2s ease-out;
 	}
+    
+    /* NEW: Style for the highlighted link */
+    :global(svg .links line.highlighted) {
+        stroke: #facc15; /* A bright yellow */
+        stroke-width: 4px;
+    }
 
-	:global(svg .nodes circle) {
-		stroke-width: 2px;
-		transition: transform 0.1s ease-in-out;
-	}
-	:global(svg .nodes g.node:hover circle) {
-		transform: scale(1.1);
-	}
-
-	:global(svg .nodes text) {
-		fill: #ccc;
-		font-size: 10px;
-		font-family: monospace;
-		paint-order: stroke;
-		stroke: #1e1e1e;
-		stroke-width: 2px;
-		stroke-linejoin: round;
-		pointer-events: none; /* Allows dragging through text */
-		transform: translate(0, -16px);
-		text-anchor: middle;
-	}
+	:global(svg .nodes circle) { stroke-width: 2px; transition: transform 0.1s ease-in-out; }
+	:global(svg .nodes g.node:hover circle) { transform: scale(1.1); }
+	:global(svg .nodes text) { fill: #ccc; font-size: 10px; font-family: monospace; paint-order: stroke; stroke: #1e1e1e; stroke-width: 2px; stroke-linejoin: round; pointer-events: none; transform: translate(0, -16px); text-anchor: middle; }
 </style>

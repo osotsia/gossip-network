@@ -1,3 +1,4 @@
+// --- File: frontend/src/lib/networkStore.svelte.ts ---
 // src/lib/networkStore.ts
 import type { NodeId, NodeInfo, WebSocketMessage, UpdatePayload } from './types';
 
@@ -6,6 +7,11 @@ let isConnected = $state(false);
 let selfId: NodeId | null = $state(null);
 let nodes = $state<Record<NodeId, NodeInfo>>({});
 let activeConnections = $state<Set<NodeId>>(new Set());
+
+// NEW: Add state to track the source of the last message for highlighting.
+let lastMessageSource: NodeId | null = $state(null);
+let highlightTimeoutId: number | null = null;
+
 
 export interface LogEntry {
     id: number;
@@ -75,8 +81,17 @@ function connect() {
 
                 switch (event) {
                     case 'node_added':
+                        nodes[eventData.id] = eventData.info;
+                        break;
                     case 'node_updated':
                         nodes[eventData.id] = eventData.info;
+                        // NEW: Trigger the highlight effect for the link.
+                        // This identifies the originator of the update.
+                        if (highlightTimeoutId) clearTimeout(highlightTimeoutId);
+                        lastMessageSource = eventData.id;
+                        highlightTimeoutId = window.setTimeout(() => {
+                            lastMessageSource = null;
+                        }, 750); // Highlight duration
                         break;
                     case 'node_removed':
                         delete nodes[eventData.id];
@@ -109,6 +124,8 @@ export const networkStore = {
     get selfId() { return selfId; },
     get nodes() { return nodes; },
     get activeConnections() { return activeConnections; },
+    // NEW: Expose the last message source for the visualizer to react to.
+    get lastMessageSource() { return lastMessageSource; },
     get log() { return log; },
     connect,
     truncateNodeId
