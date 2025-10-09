@@ -1,5 +1,4 @@
 <script lang="ts">
-	// REFACTOR: Import from the new state module.
 	import { networkState, truncateNodeId } from '../lib/networkState.svelte.ts';
 	import * as d3 from 'd3';
 	import type { NodeId, NodeInfo } from '../lib/types';
@@ -28,8 +27,6 @@
     let graphNodes: SimulationNode[] = [];
 	const NODE_RADIUS = 12;
 
-	// REFACTOR: The main effect now handles only structural changes to the graph.
-	// A nested effect is used for animations to improve performance.
 	$effect(() => {
 		if (!svgElement) return;
 
@@ -59,9 +56,9 @@
 		// --- Reactive Data Merge (updates graph structure) ---
         const storeNodes = networkState.nodes;
         const nodeMap = new Map(graphNodes.map(n => [n.id, n]));
-        graphNodes = graphNodes.filter(n => storeNodes[n.id]); // Remove deleted nodes
+        graphNodes = graphNodes.filter(n => storeNodes[n.id]);
 
-        for (const id in storeNodes) { // Add or update nodes
+        for (const id in storeNodes) {
             const info = storeNodes[id];
             const existingNode = nodeMap.get(id);
             if (existingNode) {
@@ -80,6 +77,15 @@
 				    source: selfId,
 				    target: peerId,
 			    }));
+            
+            // MODIFICATION: Pin the central node to the center of the SVG.
+            // By setting `fx` and `fy`, we tell the D3 force simulation to keep
+            // this node at a fixed position, overriding other forces.
+            const selfNode = graphNodes.find(n => n.id === selfId);
+            if (selfNode) {
+                selfNode.fx = width / 2;
+                selfNode.fy = height / 2;
+            }
 		}
 
 		// --- D3 Data Join & Update ---
@@ -97,7 +103,7 @@
 		nodeEnter.append('circle');
 		nodeEnter.append('text');
 		nodeEnter.append('title');
-		nodeEnter.call(drag(simulation));
+		nodeEnter.call(drag(simulation, selfId));
 
 		const nodeMerged = nodeEnter.merge(nodeSelection as any);
 
@@ -116,9 +122,6 @@
 		simulation.force<d3.ForceLink<SimulationNode, SimulationLink>>('link')?.links(links);
 		simulation.alpha(0.3).restart();
 
-		// --- NESTED EFFECT FOR ANIMATIONS ---
-		// This inner effect only re-runs when `networkState.currentPulsePeers` changes,
-		// preventing the expensive D3 data joins above from re-running unnecessarily.
 		$effect(() => {
 			const peersToAnimate = networkState.currentPulsePeers;
 			if (peersToAnimate.size > 0 && d3State) {
@@ -139,7 +142,6 @@
 			}
 		});
 
-		// --- Ticked Function ---
 		function ticked() {
 			if (!d3State) return;
 			d3State.linkMerged
@@ -153,7 +155,8 @@
 	});
 
 	// --- D3 Drag Handler ---
-	function drag(simulation: d3.Simulation<SimulationNode, any>) {
+    // MODIFICATION: The drag handler now prevents the central node from being moved.
+	function drag(simulation: d3.Simulation<SimulationNode, any>, selfNodeId: NodeId | null) {
 		function dragstarted(event: d3.D3DragEvent<any, any, any>, d: SimulationNode) {
 			if (!event.active) simulation.alphaTarget(0.3).restart();
 			d.fx = d.x;
@@ -165,16 +168,26 @@
 		}
 		function dragended(event: d3.D3DragEvent<any, any, any>, d: SimulationNode) {
 			if (!event.active) simulation.alphaTarget(0);
-			d.fx = null;
-			d.fy = null;
+			// Only unpin the node if it's NOT the central self-node.
+			if (d.id !== selfNodeId) {
+                d.fx = null;
+			    d.fy = null;
+            }
 		}
-		return d3.drag<any, SimulationNode>().on('start', dragstarted).on('drag', dragged).on('end', dragended);
+		return d3.drag<any, SimulationNode>()
+            // MODIFICATION: Use the filter method to disable dragging for the central node.
+            .filter((event) => {
+                const d = d3.select<any, SimulationNode>(event.currentTarget).datum();
+                return d.id !== selfNodeId;
+            })
+            .on('start', dragstarted)
+            .on('drag', dragged)
+            .on('end', dragended);
 	}
 </script>
 
 <div class="graph-container">
 	<div class="stats-bar">
-		<!-- REFACTOR: Access properties from the exported state object -->
 		<span>Nodes: {Object.keys(networkState.nodes).length}</span>
 		<span>Active Connections: {networkState.activeConnections.size}</span>
 	</div>
