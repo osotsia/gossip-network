@@ -2,20 +2,20 @@
     import Header from './components/Header.svelte';
     import LogView from './components/LogView.svelte';
     import GraphView from './components/GraphView.svelte';
-    // FIX: Import the single viewStore object.
-    import { viewStore } from './lib/viewStore.svelte.ts';
-    import { networkStore } from './lib/networkStore.svelte.ts';
+    // REFACTOR: Import the new state object and the connect function.
+    import { viewState } from './lib/viewState.svelte.ts';
+    import { connect } from './lib/networkState.svelte.ts';
 
-    networkStore.connect();
+    connect();
 </script>
 
 <div class="app-layout">
     <Header />
     <main class="main-content">
-        <!-- FIX: Access the activeView property from the viewStore object. -->
-        {#if viewStore.activeView === 'Log'}
+        <!-- REFACTOR: Access the `active` property directly from the state object. -->
+        {#if viewState.active === 'Log'}
             <LogView />
-        {:else if viewStore.activeView === 'Graph'}
+        {:else if viewState.active === 'Graph'}
             <GraphView />
         {/if}
     </main>

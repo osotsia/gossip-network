@@ -1,9 +1,9 @@
 <script lang="ts">
-	import { networkStore } from '../lib/networkStore.svelte.ts';
+	// REFACTOR: Import from the new state module.
+	import { networkState, truncateNodeId } from '../lib/networkState.svelte.ts';
 	import * as d3 from 'd3';
 	import type { NodeId, NodeInfo } from '../lib/types';
 
-	// D3 requires mutable objects for simulation, so we define an extended type.
 	interface SimulationNode extends d3.SimulationNodeDatum {
 		id: NodeId;
 		info: NodeInfo;
@@ -18,7 +18,6 @@
 	let width = 800;
 	let height = 600;
 
-	// Encapsulate D3 state to manage it across effect re-runs.
 	let d3State: {
 		simulation: d3.Simulation<SimulationNode, SimulationLink>;
 		linkGroup: d3.Selection<SVGGElement, unknown, null, undefined>;
@@ -27,14 +26,12 @@
 	} | null = null;
     
     let graphNodes: SimulationNode[] = [];
-
-	// FIX: Replace dynamic radius constants with a single fixed value for clarity.
 	const NODE_RADIUS = 12;
 
-	// FIX: Combine the graph update and animation logic into a single effect.
-	// This guarantees that link elements exist before animation is attempted, resolving the race condition.
+	// REFACTOR: The main effect now handles only structural changes to the graph.
+	// A nested effect is used for animations to improve performance.
 	$effect(() => {
-		if (!svgElement) return; // Wait for the SVG element to be bound.
+		if (!svgElement) return;
 
 		// --- One-time D3 setup ---
 		if (!d3State) {
@@ -52,7 +49,6 @@
 
 			const linkGroup = svg.append('g').attr('class', 'links');
 			const nodeGroup = svg.append('g').attr('class', 'nodes');
-
             const linkMerged = linkGroup.selectAll('line').data<SimulationLink>([]);
 
 			d3State = { simulation, linkGroup, nodeGroup, linkMerged };
@@ -61,11 +57,11 @@
 		const { simulation, linkGroup, nodeGroup } = d3State;
 
 		// --- Reactive Data Merge (updates graph structure) ---
-        const storeNodes = networkStore.nodes;
+        const storeNodes = networkState.nodes;
         const nodeMap = new Map(graphNodes.map(n => [n.id, n]));
-        graphNodes = graphNodes.filter(n => storeNodes[n.id]);
+        graphNodes = graphNodes.filter(n => storeNodes[n.id]); // Remove deleted nodes
 
-        for (const id in storeNodes) {
+        for (const id in storeNodes) { // Add or update nodes
             const info = storeNodes[id];
             const existingNode = nodeMap.get(id);
             if (existingNode) {
@@ -75,10 +71,10 @@
             }
         }
 
-		const selfId = networkStore.selfId;
+		const selfId = networkState.selfId;
 		let links: SimulationLink[] = [];
 		if (selfId) {
-			links = [...networkStore.activeConnections]
+			links = [...networkState.activeConnections]
                 .filter(peerId => storeNodes[peerId]) 
                 .map((peerId) => ({
 				    source: selfId,
@@ -87,25 +83,17 @@
 		}
 
 		// --- D3 Data Join & Update ---
-		const linkSelection = linkGroup
-			.selectAll('line')
-			.data(links, (d: any) => `${d.source}-${d.target}`);
-
+		const linkSelection = linkGroup.selectAll('line').data(links, (d: any) => `${d.source}-${d.target}`);
 		linkSelection.exit().remove();
 		const linkEnter = linkSelection.enter().append('line');
 		d3State.linkMerged = linkEnter.merge(linkSelection); 
 
-		const nodeSelection = nodeGroup
-			.selectAll('g.node')
-			.data(graphNodes, (d: any) => d.id);
-
+		const nodeSelection = nodeGroup.selectAll('g.node').data(graphNodes, (d: any) => d.id);
 		nodeSelection.exit().remove();
 		const nodeEnter = nodeSelection.enter().append('g').attr('class', 'node');
 
 		const colorScale = d3.scaleOrdinal(d3.schemeCategory10);
-		// FIX: The radius scale is no longer needed.
-		// const radiusScale = d3.scaleLinear().domain([100, 150]).range([MIN_RADIUS, MAX_RADIUS]).clamp(true);
-
+		
 		nodeEnter.append('circle');
 		nodeEnter.append('text');
 		nodeEnter.append('title');
@@ -114,44 +102,47 @@
 		const nodeMerged = nodeEnter.merge(nodeSelection as any);
 
 		nodeMerged.select('circle')
-            // FIX: Use the fixed NODE_RADIUS. The transition is removed as it's now static.
 			.attr('r', NODE_RADIUS)
 			.attr('fill', d => colorScale(d.info.community_id.toString()))
 			.attr('stroke', d => (d.id === selfId ? '#facc15' : '#777'));
 
 		nodeMerged.select('text')
-			.text(d => networkStore.truncateNodeId(d.id));
+			.text(d => truncateNodeId(d.id));
 
 		nodeMerged.select('title')
-			// FIX: Remove the telemetry value from the tooltip for consistency.
 			.text(d => `ID: ${d.id}\nCommunity: ${d.info.community_id}`);
 
 		simulation.nodes(graphNodes);
 		simulation.force<d3.ForceLink<SimulationNode, SimulationLink>>('link')?.links(links);
 		simulation.alpha(0.3).restart();
 
-		// --- Animation Logic ---
-		const peersToAnimate = networkStore.currentPulsePeers;
-		if (peersToAnimate.size > 0) {
-			const linksToAnimate = d3State.linkMerged.filter(d => {
-				const sourceNodeId = (d.source as SimulationNode).id;
-				const targetNodeId = (d.target as SimulationNode).id;
-				
-				return (sourceNodeId === selfId && peersToAnimate.has(targetNodeId)) ||
-					   (targetNodeId === selfId && peersToAnimate.has(sourceNodeId));
-			});
-
-			if (!linksToAnimate.empty()) {
-				linksToAnimate.classed('highlight-pulse', false);
-				requestAnimationFrame(() => {
-					linksToAnimate.classed('highlight-pulse', true);
+		// --- NESTED EFFECT FOR ANIMATIONS ---
+		// This inner effect only re-runs when `networkState.currentPulsePeers` changes,
+		// preventing the expensive D3 data joins above from re-running unnecessarily.
+		$effect(() => {
+			const peersToAnimate = networkState.currentPulsePeers;
+			if (peersToAnimate.size > 0 && d3State) {
+				const linksToAnimate = d3State.linkMerged.filter(d => {
+					const sourceNodeId = (d.source as SimulationNode).id;
+					const targetNodeId = (d.target as SimulationNode).id;
+					
+					return (sourceNodeId === selfId && peersToAnimate.has(targetNodeId)) ||
+						   (targetNodeId === selfId && peersToAnimate.has(sourceNodeId));
 				});
+
+				if (!linksToAnimate.empty()) {
+					linksToAnimate.classed('highlight-pulse', false);
+					requestAnimationFrame(() => {
+						linksToAnimate.classed('highlight-pulse', true);
+					});
+				}
 			}
-		}
+		});
 
 		// --- Ticked Function ---
 		function ticked() {
-			d3State?.linkMerged
+			if (!d3State) return;
+			d3State.linkMerged
 				.attr('x1', (d: any) => d.source.x)
 				.attr('y1', (d: any) => d.source.y)
 				.attr('x2', (d: any) => d.target.x)
@@ -183,8 +174,9 @@
 
 <div class="graph-container">
 	<div class="stats-bar">
-		<span>Nodes: {Object.keys(networkStore.nodes).length}</span>
-		<span>Active Connections: {networkStore.activeConnections.size}</span>
+		<!-- REFACTOR: Access properties from the exported state object -->
+		<span>Nodes: {Object.keys(networkState.nodes).length}</span>
+		<span>Active Connections: {networkState.activeConnections.size}</span>
 	</div>
 	<div class="svg-wrapper">
 		<svg bind:this={svgElement} width="100%" height="100%">

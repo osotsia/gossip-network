@@ -1,19 +1,19 @@
 <script lang="ts">
-    // FIX: Import the single viewStore object.
-    import { viewStore } from '../lib/viewStore.svelte.ts';
-    import { networkStore } from '../lib/networkStore.svelte.ts';
+    // REFACTOR: Import state objects, constants, and mutator functions from the new state modules.
+    import { viewState, viewOrder, setView } from '../lib/viewState.svelte.ts';
+    import { networkState, truncateNodeId } from '../lib/networkState.svelte.ts';
 </script>
 
 <header class="app-header">
     <div class="title-and-nav">
         <h1>Gossip Network Visualizer</h1>
         <nav aria-label="Main Views">
-            <!-- FIX: Access viewOrder from the store object. -->
-            {#each viewStore.viewOrder as view}
+            <!-- REFACTOR: Use the exported constant and function for view management. -->
+            {#each viewOrder as view}
                 <button
-                    class:active={viewStore.activeView === view}
-                    onclick={() => viewStore.setView(view)}
-                    aria-current={viewStore.activeView === view ? 'page' : undefined}
+                    class:active={viewState.active === view}
+                    onclick={() => setView(view)}
+                    aria-current={viewState.active === view ? 'page' : undefined}
                 >
                     {view}
                 </button>
@@ -22,16 +22,17 @@
     </div>
 
     <div class="status-wrapper">
-        {#if networkStore.selfId}
+        <!-- REFACTOR: Access state properties directly from the reactive state objects. -->
+        {#if networkState.selfId}
             <div class="status-item">
                 <span class="label">Node ID:</span>
-                <span class="value self-id">{networkStore.truncateNodeId(networkStore.selfId)}</span>
+                <span class="value self-id">{truncateNodeId(networkState.selfId)}</span>
             </div>
         {/if}
         <div class="status-item">
             <span class="label">Status:</span>
-            <span class="value" class:connected={networkStore.isConnected} class:disconnected={!networkStore.isConnected}>
-                {networkStore.isConnected ? 'Connected' : 'Disconnected'}
+            <span class="value" class:connected={networkState.isConnected} class:disconnected={!networkState.isConnected}>
+                {networkState.isConnected ? 'Connected' : 'Disconnected'}
             </span>
         </div>
     </div>
