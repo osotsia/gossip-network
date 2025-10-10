@@ -6,16 +6,14 @@
 use crate::{
     config::Config,
     domain::{GossipPayload, Identity, NetworkState, NodeId, NodeInfo, SignedMessage, TelemetryData},
-    // MODIFICATION: Import ConnectionEvent
     transport::{ConnectionEvent, InboundMessage, TransportCommand},
 };
 use std::{
-    // MODIFICATION: Import HashSet
     collections::{HashMap, HashSet},
     net::SocketAddr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{broadcast, mpsc, watch}; // MODIFICATION: Import broadcast
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
@@ -26,18 +24,16 @@ pub struct Engine {
     identity: Identity,
     config: Config,
     gossip_interval: Duration,
+    // NEW: Use a duration for the cleanup interval.
+    cleanup_interval: Duration,
     node_ttl: Duration,
-    // The canonical state of the network from this node's perspective.
     node_info: HashMap<crate::domain::NodeId, NodeInfo>,
     known_peers: HashMap<crate::domain::NodeId, SocketAddr>,
-    // NEW: State for tracking active P2P connections reported by Transport.
     active_peer_addrs: HashSet<SocketAddr>,
     inbound_rx: mpsc::Receiver<InboundMessage>,
-    // NEW: Receiver for connection events.
     conn_event_rx: mpsc::Receiver<ConnectionEvent>,
     transport_tx: mpsc::Sender<TransportCommand>,
     state_tx: watch::Sender<NetworkState>,
-    // NEW: Sender for animation events.
     animation_tx: broadcast::Sender<NodeId>,
 }
 
@@ -49,11 +45,12 @@ impl Engine {
         conn_event_rx: mpsc::Receiver<ConnectionEvent>,
         transport_tx: mpsc::Sender<TransportCommand>,
         state_tx: watch::Sender<NetworkState>,
-        // NEW: Accept animation event sender.
         animation_tx: broadcast::Sender<NodeId>,
     ) -> Self {
         Self {
             gossip_interval: Duration::from_millis(config.gossip_interval_ms),
+            // MODIFICATION: Use configurable cleanup interval.
+            cleanup_interval: Duration::from_millis(config.cleanup_interval_ms),
             node_ttl: Duration::from_millis(config.node_ttl_ms),
             identity,
             config,
@@ -71,7 +68,8 @@ impl Engine {
     pub async fn run(mut self, shutdown_token: CancellationToken) {
         tracing::info!(node_id = %self.identity.node_id, "Engine service started");
         let mut gossip_timer = time::interval(self.gossip_interval);
-        let mut cleanup_timer = time::interval(Duration::from_secs(60));
+        // MODIFICATION: Use the configured duration.
+        let mut cleanup_timer = time::interval(self.cleanup_interval);
 
         loop {
             tokio::select! {
@@ -122,15 +120,12 @@ impl Engine {
             return;
         }
 
-        // Before checking for newness, find the NodeId of the immediate peer who sent this message.
-        // This requires a reverse lookup in our `known_peers` map.
         let peer_node_id = self
             .known_peers
             .iter()
             .find(|(_, &addr)| addr == inbound.peer_addr)
             .map(|(id, _)| *id);
 
-        // Update the known peer's address. This is crucial for the reverse lookup above.
         self.known_peers
             .insert(inbound.message.originator, inbound.peer_addr);
 
@@ -151,7 +146,6 @@ impl Engine {
             self.node_info
                 .insert(inbound.message.originator, node_info);
             
-            // NEW: If we found the peer's NodeId, send an animation event.
             if let Some(id) = peer_node_id {
                 if self.animation_tx.send(id).is_err() {
                     tracing::trace!(peer_id = %id, "No active API listeners for animation event.");
@@ -233,7 +227,9 @@ impl Engine {
             .node_info
             .iter()
             .filter(|(id, data)| {
-                **id != self.identity.node_id && (now_ms - data.telemetry.timestamp_ms) > ttl_ms
+                **id != self.identity.node_id
+                    && data.telemetry.timestamp_ms < now_ms
+                    && (now_ms - data.telemetry.timestamp_ms) > ttl_ms
             })
             .map(|(id, _)| *id)
             .collect();

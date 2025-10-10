@@ -7,16 +7,14 @@
 use crate::error::{Error, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::{rngs::OsRng, RngCore};
-// MODIFICATION: Add serde imports  custom serialization.
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
-// FIX: Merged use statements.
 use std::{
     collections::{HashMap},
     fmt, fs, io,
     path::Path,
 };
 // --- Cryptographic Identity ---
-#[derive(Debug)]
+#[derive(Debug, Clone)] // MODIFICATION: Added Clone
 pub struct Identity {
     keypair: SigningKey,
     pub node_id: NodeId,
@@ -65,11 +63,9 @@ impl Identity {
 
 // --- Domain Models ---
 
-// MODIFICATION: Remove Serialize/Deserialize from derive, as we implement it manually.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct NodeId(pub [u8; 32]);
 
-// FIX: Manual implementation for JSON-friendly (hex string) serialization.
 impl Serialize for NodeId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -79,7 +75,6 @@ impl Serialize for NodeId {
     }
 }
 
-// FIX: Manual implementation for deserialization from a hex string.
 impl<'de> Deserialize<'de> for NodeId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -136,18 +131,85 @@ impl SignedMessage {
 }
 
 /// Information about a node, as held by the Engine.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)] // Add Deserialize and PartialEq for delta logic
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct NodeInfo {
     pub telemetry: TelemetryData,
     pub community_id: u32,
 }
 
 /// A snapshot of the network state, for use by the visualizer.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)] // Add Deserialize
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NetworkState {
     pub self_id: Option<NodeId>,
     pub nodes: HashMap<NodeId, NodeInfo>,
-    // MODIFICATION: Rename `edges` to `active_connections` for clarity.
-    // This will represent true, active P2P connections, not just known peers.
     pub active_connections: Vec<NodeId>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A helper struct to bundle an identity with a convenient way to sign messages.
+    struct TestPeer {
+        identity: Identity,
+    }
+
+    impl TestPeer {
+        fn new() -> Self {
+            Self {
+                identity: Identity::new(),
+            }
+        }
+
+        fn sign(&self, timestamp_ms: u64) -> SignedMessage {
+            let payload = GossipPayload {
+                telemetry: TelemetryData { timestamp_ms, value: 42.0 },
+                community_id: 1,
+            };
+            self.identity.sign(payload)
+        }
+    }
+
+    #[test]
+    fn signature_verification_succeeds_for_valid_message() {
+        let peer = TestPeer::new();
+        let message = peer.sign(1000);
+        assert!(message.verify().is_ok());
+    }
+
+    #[test]
+    fn signature_verification_fails_for_tampered_payload() {
+        let peer = TestPeer::new();
+        let mut message = peer.sign(1000);
+
+        // Mutate the payload after signing.
+        message.message.telemetry.value = 999.0;
+
+        assert!(message.verify().is_err());
+    }
+
+    #[test]
+    fn signature_verification_fails_for_wrong_originator() {
+        let peer_a = TestPeer::new();
+        let peer_b = TestPeer::new(); // A different identity.
+        let mut message = peer_a.sign(1000);
+
+        // Attribute the message to a different peer without re-signing.
+        message.originator = peer_b.identity.node_id;
+
+        assert!(message.verify().is_err());
+    }
+
+    #[test]
+    fn signature_verification_fails_for_corrupted_signature() {
+        let peer = TestPeer::new();
+        let mut message = peer.sign(1000);
+
+        // Flip a bit in the signature.
+        let mut sig_bytes = message.signature.to_bytes();
+        sig_bytes[0] ^= 0xff;
+        message.signature = Signature::from_bytes(&sig_bytes);
+
+        assert!(message.verify().is_err());
+    }
 }

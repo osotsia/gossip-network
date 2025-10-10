@@ -4,13 +4,14 @@
 //! between backend state and the frontend's data model.
 
 use crate::domain::{NetworkState, NodeId, NodeInfo};
-use serde::Serialize;
+// NEW: Import Deserialize
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// A structured message sent from the server to a WebSocket client.
 /// This enum represents all possible communications, allowing for strong typing
 /// on both the backend and frontend.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)] // MODIFICATION: Added Deserialize
 #[serde(tag = "type", content = "payload")]
 pub enum WebSocketMessage {
     #[serde(rename = "snapshot")]
@@ -20,7 +21,7 @@ pub enum WebSocketMessage {
 }
 
 /// The initial state payload sent to a client upon connection.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)] // MODIFICATION: Added Deserialize
 pub struct SnapshotPayload {
     pub self_id: NodeId,
     pub nodes: HashMap<NodeId, NodeInfo>,
@@ -30,8 +31,6 @@ pub struct SnapshotPayload {
 impl From<&NetworkState> for SnapshotPayload {
     fn from(state: &NetworkState) -> Self {
         Self {
-            // FIX: Use unwrap_or_default() for robustness, though the new ws.rs logic
-            // should prevent self_id from being None here. This is a good defensive measure.
             self_id: state.self_id.unwrap_or_default(),
             nodes: state.nodes.clone(),
             active_connections: state.active_connections.clone(),
@@ -40,7 +39,7 @@ impl From<&NetworkState> for SnapshotPayload {
 }
 
 /// An incremental update payload, describing a specific change in the network state.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)] // MODIFICATION: Added Deserialize
 #[serde(tag = "event", content = "data")]
 pub enum UpdatePayload {
     #[serde(rename = "node_added")]
@@ -54,7 +53,6 @@ pub enum UpdatePayload {
         peer_id: NodeId,
         is_connected: bool,
     },
-    // NEW: Add a dedicated event for triggering edge animations.
     #[serde(rename = "animate_edge")]
     AnimateEdge { from_peer: NodeId },
 }

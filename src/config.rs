@@ -20,6 +20,8 @@ pub struct Config {
     pub gossip_interval_ms: u64,
     pub gossip_factor: usize,
     pub node_ttl_ms: u64,
+    // NEW: Make cleanup interval configurable for better testability.
+    pub cleanup_interval_ms: u64,
     pub community_id: u32,
     pub visualizer: Option<VisualizerConfig>,
 }
@@ -49,6 +51,7 @@ impl Default for Config {
             gossip_interval_ms: 5000,
             gossip_factor: 2,
             node_ttl_ms: 300000, // 5 minutes
+            cleanup_interval_ms: 60000, // 1 minute
             community_id: 0,
             visualizer: None,
         }
